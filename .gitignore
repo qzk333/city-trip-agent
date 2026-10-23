@@ -1,0 +1,46 @@
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.coverage
+htmlcov/
+
+# Frontend
+node_modules/
+dist/
+.vite/
+coverage/
+playwright-report/
+test-results/
+
+# Runtime files and unreviewed data
+*.log
+*.sqlite
+*.sqlite3
+*.db
+logs/
+tmp/
+data/raw/
+data/private/
+evals/results/
+artifacts/
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
