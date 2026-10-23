@@ -1,0 +1,16 @@
+{
+  "version": "demo-2026-10-23",
+  "notice": "自建演示夹具，不是实时旅游数据。坐标近似，营业时间、停留时间和室内外属性仅用于验证排程。出行前需要真实核验。",
+  "places": [
+    {"id":"westlake","name":"西湖 · 湖滨","subtitle":"湖边散步 · 自然风景","longitude":120.155,"latitude":30.249,"category":"nature","indoor":false,"duration_minutes":75,"opening":"08:00","closing":"19:00","description":"从湖滨开始，给第一天留一些慢下来的时间。"},
+    {"id":"broken_bridge","name":"断桥残雪","subtitle":"湖景与城市漫步","longitude":120.148,"latitude":30.258,"category":"nature","indoor":false,"duration_minutes":45,"opening":"08:00","closing":"19:00","description":"适合与北侧湖岸安排在同一段行程。"},
+    {"id":"gushan_museum","name":"浙博 · 孤山馆区","subtitle":"文化展览 · 室内为主","longitude":120.139,"latitude":30.253,"category":"culture","indoor":true,"duration_minutes":90,"opening":"09:00","closing":"16:30","description":"演示用文化活动；实际开放、展览和预约要求需另行核实。"},
+    {"id":"quyuan","name":"曲院风荷","subtitle":"园林与湖边步道","longitude":120.129,"latitude":30.251,"category":"nature","indoor":false,"duration_minutes":60,"opening":"08:00","closing":"18:00","description":"保留足够的园内停留与休息时间。"},
+    {"id":"leifeng","name":"雷峰塔景区","subtitle":"湖景与历史建筑","longitude":120.149,"latitude":30.230,"category":"culture","indoor":false,"duration_minutes":75,"opening":"09:00","closing":"17:00","description":"景区内部步行、票价与最晚入场时间尚未核验。"},
+    {"id":"hefang","name":"河坊街","subtitle":"老街与城市生活","longitude":120.172,"latitude":30.237,"category":"city","indoor":false,"duration_minutes":60,"opening":"10:00","closing":"20:00","description":"安排城市漫步，具体商户营业时间各不相同。"},
+    {"id":"art_museum","name":"浙江美术馆","subtitle":"艺术展览 · 室内","longitude":120.153,"latitude":30.229,"category":"culture","indoor":true,"duration_minutes":90,"opening":"09:00","closing":"16:30","description":"作为室内替代活动的演示候选，展览和开放日需核验。"},
+    {"id":"coffee","name":"湖滨咖啡休息点（演示）","subtitle":"虚拟休息点 · 非真实商户","longitude":120.161,"latitude":30.252,"category":"coffee","indoor":true,"duration_minutes":45,"opening":"09:00","closing":"19:00","description":"用于演示休息安排，不代表任何真实商家。"},
+    {"id":"silk_museum","name":"中国丝绸博物馆","subtitle":"丝绸文化 · 室内为主","longitude":120.149,"latitude":30.220,"category":"culture","indoor":true,"duration_minutes":90,"opening":"09:00","closing":"16:30","description":"与南侧地点组合的文化候选，实际开放信息待核实。"},
+    {"id":"wulin","name":"武林广场","subtitle":"城市地标与周边街区","longitude":120.165,"latitude":30.273,"category":"city","indoor":false,"duration_minutes":45,"opening":"08:00","closing":"20:00","description":"用于演示城区地点与湖区之间的交通安排。"}
+  ]
+}

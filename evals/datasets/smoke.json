@@ -1,0 +1,16 @@
+{
+  "version": "smoke-v1",
+  "description": "10 条自建排程冒烟任务；用于回归，不代表真实出行成功率。",
+  "cases": [
+    {"id":"normal","requirements":{"start_date":"2026-10-24","must_visit":["westlake","gushan_museum"]},"expected":"NEEDS_CONFIRMATION"},
+    {"id":"walking","requirements":{"start_date":"2026-10-24","transport":"walking","must_visit":["westlake"]},"expected":"NEEDS_CONFIRMATION"},
+    {"id":"two-days","requirements":{"start_date":"2026-10-24","days":2},"expected":"NEEDS_CONFIRMATION"},
+    {"id":"three-days","requirements":{"start_date":"2026-10-24","days":3},"expected":"NEEDS_CONFIRMATION"},
+    {"id":"fixed-appointment","requirements":{"start_date":"2026-10-24","appointments":[{"place_id":"gushan_museum","start":"14:00","end":"15:30"}]},"expected":"NEEDS_CONFIRMATION"},
+    {"id":"overlap","requirements":{"start_date":"2026-10-24","appointments":[{"place_id":"gushan_museum","start":"14:00","end":"15:30"},{"place_id":"art_museum","start":"15:00","end":"16:00"}]},"expected":"CONFLICT"},
+    {"id":"short-day","requirements":{"start_date":"2026-10-24","day_end":"09:10","must_visit":["westlake"]},"expected":"NO_SOLUTION_WITHIN_LIMIT"},
+    {"id":"before-opening","requirements":{"start_date":"2026-10-24","day_start":"07:00","day_end":"08:40","must_visit":["gushan_museum"]},"expected":"NO_SOLUTION_WITHIN_LIMIT"},
+    {"id":"fixed-outside-day","requirements":{"start_date":"2026-10-24","day_end":"13:00","appointments":[{"place_id":"gushan_museum","start":"14:00","end":"15:30"}]},"expected":"CONFLICT"},
+    {"id":"tool-budget","requirements":{"start_date":"2026-10-24","must_visit":["westlake"]},"settings":{"max_route_calls":1},"expected":"NO_SOLUTION_WITHIN_LIMIT"}
+  ]
+}
