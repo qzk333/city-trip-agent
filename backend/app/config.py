@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     llm_base_url: str = ""
     llm_api_key: str = ""
     llm_model: str = ""
+    user_supplied_credentials: bool = False
     tool_timeout_seconds: float = Field(default=12, gt=0, le=30)
     max_route_calls: int = Field(default=100, ge=1, le=500)
     max_run_seconds: float = Field(default=60, gt=0, le=180)

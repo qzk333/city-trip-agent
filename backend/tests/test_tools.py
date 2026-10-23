@@ -7,7 +7,9 @@ from app.tools import ToolUnavailable, TravelTools
 
 
 def test_weather_does_not_extend_provider_forecast_dates(monkeypatch):
-    tools = TravelTools(Settings(tool_provider="amap", amap_api_key="placeholder", _env_file=None))
+    tools = TravelTools(
+        Settings(tool_provider="amap", amap_api_key="placeholder", _env_file=None), adcode="330100"
+    )
     monkeypatch.setattr(
         tools,
         "_get",

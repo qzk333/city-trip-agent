@@ -6,7 +6,7 @@ from app.catalog import CATALOG
 from app.config import Settings
 from app.llm import model_candidates
 from app.planner import build_plan
-from app.schemas import Itinerary, Requirements
+from app.schemas import Itinerary, Place, Requirements
 from app.tools import TravelTools
 from app.validation import validate_itinerary
 
@@ -18,26 +18,35 @@ class PlanState(TypedDict, total=False):
 
 
 def generate(
-    requirements: Requirements, settings: Settings, emit, overrides: dict | None = None
+    requirements: Requirements,
+    settings: Settings,
+    emit,
+    overrides: dict | None = None,
+    catalog: dict[str, Place] | None = None,
 ) -> Itinerary:
-    tools = TravelTools(settings)
+    catalog = catalog if catalog is not None else CATALOG
+    tools = TravelTools(
+        settings, requirements.city, requirements.country_code, province=requirements.province
+    )
 
     def candidates(state: PlanState):
         emit("selecting", "整理需求与候选地点")
         if settings.planning_mode == "llm":
             return {
-                "order": model_candidates(state["requirements"], settings, tools.trace, emit, tools.deadline)
+                "order": model_candidates(
+                    state["requirements"], settings, tools.trace, emit, tools.deadline, catalog
+                )
             }
-        return {"order": sorted(CATALOG, key=lambda p: CATALOG[p].category not in requirements.interests)}
+        return {"order": sorted(catalog, key=lambda p: catalog[p].category not in requirements.interests)}
 
     def plan(state: PlanState):
         emit("planning", "查询交通并安排日程")
-        itinerary = build_plan(state["requirements"], state["order"], tools, overrides or {})
+        itinerary = build_plan(state["requirements"], state["order"], tools, overrides or {}, catalog)
         return {"itinerary": itinerary}
 
     def validate(state: PlanState):
         emit("validating", "独立检查时间、必去地点与预约")
-        result = validate_itinerary(state["requirements"], state["itinerary"], overrides or {})
+        result = validate_itinerary(state["requirements"], state["itinerary"], overrides or {}, catalog)
         return {"itinerary": result}
 
     graph = StateGraph(PlanState)

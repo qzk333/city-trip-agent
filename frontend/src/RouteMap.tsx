@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { MapPin } from "lucide-react";
 import type { DayPlan, Location, Place } from "./api";
+import { getBrowserConfig } from "./userConfig";
 
 interface MapInstance {
   add: (overlays: unknown[]) => void;
@@ -25,11 +26,11 @@ function loadMap(): Promise<AMapApi> {
   if (mapPromise) return mapPromise;
   mapPromise = new Promise((resolve, reject) => {
     window._AMapSecurityConfig = {
-      securityJsCode: import.meta.env.VITE_AMAP_SECURITY_CODE || "",
+      securityJsCode: getBrowserConfig().amap_security_code,
     };
     const script = document.createElement("script");
     const timeout = setTimeout(() => reject(new Error("地图加载超时")), 12000);
-    script.src = `https://webapi.amap.com/maps?v=2.0&key=${encodeURIComponent(import.meta.env.VITE_AMAP_JS_KEY)}`;
+    script.src = `https://webapi.amap.com/maps?v=2.0&key=${encodeURIComponent(getBrowserConfig().amap_js_key)}`;
     script.onload = () => {
       clearTimeout(timeout);
       window.AMap ? resolve(window.AMap) : reject(new Error("地图不可用"));
@@ -49,12 +50,14 @@ export default function RouteMap({
   hotel,
   selected,
   onSelect,
+  cityName,
 }: {
   day?: DayPlan;
   places: Place[];
   hotel: Location;
   selected: string | null;
   onSelect: (id: string) => void;
+  cityName: string;
 }) {
   const container = useRef<HTMLDivElement>(null);
   const [mapReady, setMapReady] = useState(false);
@@ -63,7 +66,13 @@ export default function RouteMap({
     .map((a) => places.find((p) => p.id === a.place_id))
     .filter((p): p is Place => !!p);
   useEffect(() => {
-    if (!import.meta.env.VITE_AMAP_JS_KEY || !container.current) return;
+    if (
+      !getBrowserConfig().amap_js_key ||
+      !container.current ||
+      hotel.coordinate_system !== "GCJ-02" ||
+      points.some((p) => p.coordinate_system !== "GCJ-02")
+    )
+      return;
     let cancelled = false;
     let map: MapInstance | undefined;
     loadMap()
@@ -165,7 +174,7 @@ export default function RouteMap({
               strokeWidth="2"
             />
             <text x="36" y="158" className="lake-label">
-              西 湖
+              {cityName === "杭州" ? "西 湖" : cityName}
             </text>
             {points.length > 0 && (
               <path

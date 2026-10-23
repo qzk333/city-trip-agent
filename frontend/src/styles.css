@@ -1553,3 +1553,189 @@ legend {
     transition: none !important;
   }
 }
+
+.destination-fields {
+  margin-bottom: 18px;
+}
+.coordinate-system-label {
+  display: block;
+  margin-top: 9px;
+  font-size: 10px;
+}
+.coordinate-system-label select {
+  margin-top: 5px;
+  font-size: 10px;
+  padding: 7px 9px;
+}
+.destination-fields > legend {
+  font-size: 13px;
+  margin-bottom: 13px;
+}
+.destination-fields .field {
+  margin-bottom: 11px;
+}
+.destination-fields select {
+  font-size: 11px;
+  min-width: 0;
+}
+.destination-fields .field > label {
+  font-size: 10px;
+}
+.city-search {
+  font-size: 10px;
+  background: #f7f9f2;
+  padding: 8px 9px;
+}
+.destination-help {
+  font-size: 9px;
+  line-height: 1.8;
+  color: #8e9982;
+  margin-top: 7px;
+}
+.catalog-query {
+  border: 1px solid #dce5d3;
+  border-radius: 7px;
+  padding: 11px;
+  margin-bottom: 18px;
+  background: #f0f5e9;
+}
+.catalog-query p {
+  font-size: 10px;
+  line-height: 1.8;
+  color: #7c8a70;
+  margin-bottom: 8px;
+}
+.catalog-query .outline-button {
+  width: 100%;
+  font-size: 10px;
+}
+.settings-modal {
+  width: 640px;
+  max-height: 90vh;
+  overflow-y: auto;
+  border: 1px solid #e2e6d8;
+  border-radius: 12px;
+  background: #fbfcf6;
+  padding: 26px 29px 20px;
+  box-shadow: 0 20px 80px #1e312533;
+}
+.settings-modal .modal-title h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.settings-intro {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  background: #edf3e6;
+  border: 1px solid #dce6d1;
+  padding: 12px;
+  border-radius: 6px;
+  color: #7d8b70;
+  line-height: 1.9;
+  font-size: 10px;
+  margin: 18px 0 21px;
+}
+.settings-intro svg {
+  flex-shrink: 0;
+  margin-top: 3px;
+}
+.settings-section {
+  border-bottom: 1px solid #e2e7d9;
+  padding-bottom: 20px;
+  margin-bottom: 20px;
+}
+.settings-section legend {
+  font-size: 14px;
+  color: #426b4d;
+  margin-bottom: 16px;
+}
+.settings-modal .field input,
+.settings-modal .field select {
+  font-size: 12px;
+}
+.settings-modal .field small,
+.settings-help,
+.map-key-details > p {
+  color: #939c86;
+  font-size: 10px;
+  line-height: 1.8;
+  display: block;
+  margin-top: 7px;
+}
+.settings-help {
+  margin-bottom: 10px;
+}
+.secret-field {
+  display: flex;
+  border: 1px solid #dde2d7;
+  background: #fff;
+  border-radius: 7px;
+  align-items: center;
+  padding-right: 8px;
+}
+.secret-field:focus-within {
+  border-color: #618d73;
+  box-shadow: 0 0 0 3px #e6eee5;
+}
+.secret-field input {
+  border: 0;
+  box-shadow: none;
+  min-width: 0;
+  background: none;
+}
+.secret-field input:focus {
+  box-shadow: none;
+}
+.secret-field button {
+  color: #89967c;
+  padding: 5px;
+}
+.map-key-details {
+  margin-top: 19px;
+  font-size: 11px;
+  color: #718763;
+}
+.map-key-details summary {
+  cursor: pointer;
+}
+.map-key-details > p {
+  margin-bottom: 14px;
+}
+.settings-footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  align-items: center;
+  margin: 20px 0 8px;
+}
+@media (max-width: 760px) {
+  .topbar .mode-pill {
+    display: none;
+  }
+  .settings-trigger {
+    font-size: 10px;
+  }
+  .settings-modal {
+    padding: 22px 18px 15px;
+    max-height: 92vh;
+  }
+  .settings-modal .field-grid {
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+  .settings-modal .modal-title h2 {
+    font-size: 19px;
+  }
+  .settings-footer {
+    align-items: stretch;
+  }
+  .settings-footer > .text-button {
+    font-size: 10px;
+  }
+  .sidebar form > .catalog-query {
+    grid-column: 1 / -1;
+  }
+}

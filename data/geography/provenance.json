@@ -1,0 +1,20 @@
+{
+  "source": "dr5hn/countries-states-cities-database",
+  "revision": "48f586f2d068e4d9ea0e50eafc16c3d0d7190070",
+  "license": "ODbL-1.0",
+  "source_sha256": "401f2db487336d00bbfd027b2080a4a393e8443f498ccfc675a67b52e08dd75a",
+  "country_count": 250,
+  "state_count": 5327,
+  "city_count": 152375,
+  "city_schema": [
+    "id",
+    "country_code",
+    "state_id",
+    "name",
+    "english_name",
+    "longitude",
+    "latitude",
+    "timezone"
+  ],
+  "coordinates": "WGS84"
+}

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import {
   ArrowDown,
@@ -20,6 +20,7 @@ import {
   RotateCcw,
   Route,
   ShieldCheck,
+  Settings2,
   Sparkles,
   TrainFront,
   Trash2,
@@ -31,6 +32,7 @@ import { api, waitForRun } from "./api";
 import type {
   Action,
   Activity,
+  Destination,
   Health,
   Itinerary,
   Place,
@@ -42,6 +44,14 @@ import type {
   Version,
 } from "./api";
 import RouteMap from "./RouteMap";
+import ApiSettings from "./ApiSettings";
+import DestinationSelect from "./DestinationSelect";
+import {
+  clearBrowserConfig,
+  getBrowserConfig,
+  saveBrowserConfig,
+} from "./userConfig";
+import type { UserAPIConfig } from "./userConfig";
 
 const storedTripKey = "city-trip:last-trip";
 function tomorrow() {
@@ -51,6 +61,13 @@ function tomorrow() {
 }
 const initial: Requirements = {
   city: "杭州",
+  country_code: "CN",
+  country: "中国",
+  state_id: "CN-ZJ",
+  province: "浙江省",
+  city_id: 19598,
+  timezone: "Asia/Shanghai",
+  catalog_id: null,
   start_date: tomorrow(),
   days: 1,
   day_start: "09:00",
@@ -98,6 +115,10 @@ export default function App() {
   const [appointmentOn, setAppointmentOn] = useState(false);
   const [delay, setDelay] = useState(40);
   const [showForm, setShowForm] = useState(true);
+  const [config, setConfig] = useState<UserAPIConfig>(getBrowserConfig);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [catalogLoading, setCatalogLoading] = useState(false);
+  const destinationRequest = useRef(0);
   const plan = proposal?.itinerary || trip?.itinerary || null;
   const day = plan?.days.find((d) => d.day === selectedDay) || plan?.days[0];
   const activeReq = trip?.requirements || form;
@@ -118,14 +139,127 @@ export default function App() {
     (plan?.day_start_offsets?.[String(day?.day || 1)] || 0);
   const displayedStart = `${String(Math.floor(startMinutes / 60)).padStart(2, "0")}:${String(startMinutes % 60).padStart(2, "0")}`;
   const activeToolProvider = plan?.tool_provider || health?.tool_provider;
-  const placeById = (id: string) => places.find((p) => p.id === id);
+  const planPlaces = trip?.places || places;
+  const placeById = (id: string) => planPlaces.find((p) => p.id === id);
+  const catalogReady =
+    config.tool_provider === "demo" ||
+    (!!form.catalog_id && places.length > 0 && places.every((p) => !p.fixture));
+  const fixedExampleAvailable = places.some((p) => p.id === "gushan_museum");
 
   async function loadTrip(id: string) {
     const saved = await api<Trip>(`/trips/${id}`);
-    setTrip(saved);
-    setForm(saved.requirements);
+    const requirements = {
+      ...initial,
+      ...saved.requirements,
+      city_id: saved.requirements.city_id ?? 19598,
+    };
+    setTrip({ ...saved, requirements });
+    setForm(requirements);
+    setPlaces(saved.places);
     setAppointmentOn(saved.requirements.appointments.length > 0);
     return saved;
+  }
+
+  function changeRegion(country: string, state: string) {
+    destinationRequest.current++;
+    setPlaces([]);
+    setAppointmentOn(false);
+    setForm((f) => ({
+      ...f,
+      country_code: country,
+      state_id: state,
+      city: "待选择",
+      timezone: "",
+      city_id: null,
+      catalog_id: null,
+      must_visit: [],
+      appointments: [],
+    }));
+  }
+
+  async function selectCity(city: Destination) {
+    const ticket = ++destinationRequest.current;
+    setCatalogLoading(true);
+    setError("");
+    setAppointmentOn(false);
+    try {
+      const [destination, catalog] = await Promise.all([
+        api<Destination>(`/geography/cities/${city.id}`),
+        api<Place[]>(`/places?city_id=${city.id}`),
+      ]);
+      if (ticket !== destinationRequest.current) return;
+      setPlaces(catalog);
+      setForm((f) => ({
+        ...f,
+        city: destination.name,
+        city_id: destination.id,
+        country_code: destination.country_code,
+        state_id: destination.state_id,
+        country: destination.country || "",
+        province: destination.state || "",
+        timezone: destination.timezone || "",
+        catalog_id: null,
+        must_visit: [],
+        appointments: [],
+        hotel: {
+          name: `参考起点 · ${destination.name}`,
+          longitude: destination.longitude,
+          latitude: destination.latitude,
+          coordinate_system: destination.coordinate_system,
+        },
+      }));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "城市加载失败");
+    } finally {
+      if (ticket === destinationRequest.current) setCatalogLoading(false);
+    }
+  }
+
+  async function discoverPlaces() {
+    if (form.city_id === null) return;
+    setCatalogLoading(true);
+    setError("");
+    const ticket = ++destinationRequest.current;
+    try {
+      const result = await api<{
+        catalog_id: string;
+        places: Place[];
+        center: Requirements["hotel"];
+      }>("/places/discover", { city_id: form.city_id });
+      if (ticket !== destinationRequest.current) return;
+      setPlaces(result.places);
+      setAppointmentOn(false);
+      setForm((f) => ({
+        ...f,
+        catalog_id: result.catalog_id,
+        hotel: result.center,
+        must_visit: [],
+        appointments: [],
+      }));
+      setNotice("已载入当前城市地点。请填写实际住处位置，并选择想去的地方。");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "地点查询失败");
+    } finally {
+      if (ticket === destinationRequest.current) setCatalogLoading(false);
+    }
+  }
+
+  async function saveSettings(next: UserAPIConfig, clear = false) {
+    const info = await api<Health>("/health", undefined, next);
+    const refreshMap =
+      next.amap_js_key !== config.amap_js_key ||
+      next.amap_security_code !== config.amap_security_code;
+    if (clear) clearBrowserConfig();
+    else saveBrowserConfig(next);
+    setConfig(next);
+    setHealth(info);
+    setSettingsOpen(false);
+    setNotice(
+      clear
+        ? "已清除本标签页的 API 配置，切回演示模式。"
+        : "API 设置已保存在当前标签页。真实地图模式请先查询城市地点。",
+    );
+    if (refreshMap) window.location.reload();
   }
 
   useEffect(() => {
@@ -194,16 +328,17 @@ export default function App() {
     try {
       const req = {
         ...form,
-        appointments: appointmentOn
-          ? [
-              {
-                place_id: "gushan_museum",
-                day: 1,
-                start: "14:00",
-                end: "15:30",
-              },
-            ]
-          : [],
+        appointments:
+          appointmentOn && fixedExampleAvailable
+            ? [
+                {
+                  place_id: "gushan_museum",
+                  day: 1,
+                  start: "14:00",
+                  end: "15:30",
+                },
+              ]
+            : [],
       };
       const created = await api<Trip>("/trips", req);
       localStorage.setItem(storedTripKey, created.id);
@@ -312,6 +447,7 @@ export default function App() {
   }
 
   function reset() {
+    destinationRequest.current++;
     localStorage.removeItem(storedTripKey);
     setTrip(null);
     setProposal(null);
@@ -322,6 +458,10 @@ export default function App() {
     setAppointmentOn(false);
     setSelectedDay(1);
     setShowForm(true);
+    setCatalogLoading(false);
+    void api<Place[]>("/places")
+      .then(setPlaces)
+      .catch(() => setError("地点加载失败，请刷新重试"));
   }
   function toggleMust(id: string) {
     setForm((f) => ({
@@ -366,10 +506,17 @@ export default function App() {
         </div>
         <div className="topbar-actions">
           <span className="mode-pill">
-            {health?.tool_provider === "amap"
-              ? "真实交通 · 地点待核验"
-              : "演示工作台"}
+            {config.planning_mode === "llm" ? "我的模型" : "规则规划"} ·{" "}
+            {config.tool_provider === "amap" ? "我的地图" : "演示地图"}
           </span>
+          <button
+            className="text-button settings-trigger"
+            disabled={busy}
+            onClick={() => setSettingsOpen(true)}
+          >
+            <Settings2 size={16} />
+            API 设置
+          </button>
           <button
             className="text-button"
             onClick={reset}
@@ -389,14 +536,39 @@ export default function App() {
             <p>告诉我你的安排，剩下的一起理顺。</p>
           </div>
           <form onSubmit={generate}>
-            <div className="field">
-              <label htmlFor="city">目的地</label>
-              <div className="destination">
-                <MapPin size={18} />
-                <input id="city" value="杭州" readOnly />
-                <span>浙江 · 中国</span>
+            <DestinationSelect
+              value={form}
+              onRegionChange={changeRegion}
+              onCity={(city) => void selectCity(city)}
+              disabled={busy || catalogLoading}
+            />
+            {config.tool_provider === "amap" && (
+              <div className="catalog-query">
+                <p>
+                  {form.country_code === "CN"
+                    ? "使用自己的 Key 查询当前城市景点与休息点。"
+                    : "境外可选演示目的地，当前高德标准接口仅支持中国大陆。"}
+                </p>
+                <button
+                  type="button"
+                  className="outline-button"
+                  disabled={
+                    busy ||
+                    catalogLoading ||
+                    form.city_id === null ||
+                    form.country_code !== "CN"
+                  }
+                  onClick={() => void discoverPlaces()}
+                >
+                  {catalogLoading ? (
+                    <LoaderCircle size={14} className="spin" />
+                  ) : (
+                    <MapPin size={14} />
+                  )}
+                  查询城市真实地点
+                </button>
               </div>
-            </div>
+            )}
             <div className="field-grid">
               <div className="field">
                 <label htmlFor="start-date">出发日期</label>
@@ -466,15 +638,37 @@ export default function App() {
                 }
               />
               <details className="coordinates">
-                <summary>调整位置坐标（高德 GCJ-02）</summary>
+                <summary>
+                  调整位置坐标（{form.hotel.coordinate_system}）
+                </summary>
+                <label className="coordinate-system-label">
+                  坐标系
+                  <select
+                    aria-label="住处坐标系"
+                    value={form.hotel.coordinate_system}
+                    onChange={(e) =>
+                      setForm({
+                        ...form,
+                        hotel: {
+                          ...form.hotel,
+                          coordinate_system: e.target
+                            .value as Requirements["hotel"]["coordinate_system"],
+                        },
+                      })
+                    }
+                  >
+                    <option value="GCJ-02">高德 GCJ-02</option>
+                    <option value="WGS84">GPS / 地理目录 WGS84</option>
+                  </select>
+                </label>
                 <div className="field-grid">
                   <label>
                     经度
                     <input
                       aria-label="住处经度"
                       type="number"
-                      min="119"
-                      max="121"
+                      min="-180"
+                      max="180"
                       step="any"
                       required
                       value={form.hotel.longitude}
@@ -494,8 +688,8 @@ export default function App() {
                     <input
                       aria-label="住处纬度"
                       type="number"
-                      min="29"
-                      max="31"
+                      min="-90"
+                      max="90"
                       step="any"
                       required
                       value={form.hotel.latitude}
@@ -610,22 +804,24 @@ export default function App() {
                 ))}
               </div>
             </fieldset>
-            <label className="appointment-toggle">
-              <input
-                type="checkbox"
-                checked={appointmentOn}
-                onChange={(e) => setAppointmentOn(e.target.checked)}
-              />
-              <span>
-                <strong>保留一项固定预约</strong>
-                <small>
-                  第 1 天 · 孤山馆区 · 14:00—15:30
-                  <br />
-                  演示时段，并非真实预约
-                </small>
-              </span>
-              <LockKeyhole size={16} />
-            </label>
+            {fixedExampleAvailable && (
+              <label className="appointment-toggle">
+                <input
+                  type="checkbox"
+                  checked={appointmentOn}
+                  onChange={(e) => setAppointmentOn(e.target.checked)}
+                />
+                <span>
+                  <strong>保留一项固定预约</strong>
+                  <small>
+                    第 1 天 · 孤山馆区 · 14:00—15:30
+                    <br />
+                    演示时段，并非真实预约
+                  </small>
+                </span>
+                <LockKeyhole size={16} />
+              </label>
+            )}
             <div className="field">
               <label htmlFor="note">
                 偏好补充{" "}
@@ -647,7 +843,15 @@ export default function App() {
             <button
               className="primary generate-button"
               type="submit"
-              disabled={busy || loading || !health}
+              disabled={
+                busy ||
+                loading ||
+                catalogLoading ||
+                !health ||
+                form.city_id === null ||
+                !form.timezone ||
+                !catalogReady
+              }
             >
               {busy ? (
                 <LoaderCircle size={17} className="spin" />
@@ -662,7 +866,10 @@ export default function App() {
               {!busy && <ArrowRight size={17} />}
             </button>
             <p className="form-footnote">
-              首版支持杭州 1—3 天。请先用演示数据体验，出行信息需要再次核验。
+              支持 1—3 天城市旅行。
+              {!catalogReady
+                ? "请先查询真实地点，或在 API 设置中切回演示模式。"
+                : "演示占位与真实查询会分别标注。"}
             </p>
           </form>
         </aside>
@@ -686,8 +893,8 @@ export default function App() {
               <p>行程有安排，也有临时改变的余地。</p>
             </div>
             <div className="heading-stamp">
-              <span>HANGZHOU</span>
-              <strong>杭 州</strong>
+              <span>CITY COMPANION</span>
+              <strong>{activeReq.city}</strong>
               <small>慢一点，发现多一点</small>
             </div>
           </div>
@@ -699,7 +906,9 @@ export default function App() {
                   ? "已选择真实交通查询。"
                   : "当前使用固定演示数据。"}
               </strong>{" "}
-              地点时间与坐标为演示夹具，路线
+              {planPlaces.every((p) => p.fixture)
+                ? "地点为演示夹具或占位活动，路线"
+                : "地点来自地图查询，营业与停留时间待核实；路线"}
               {activeToolProvider === "amap" ? "为查询时估计" : "为距离估算"}
               ；天气未知时会明确保留，不作为真实出行保证。
             </p>
@@ -726,12 +935,12 @@ export default function App() {
             <div>
               <span className="location-kicker">
                 <MapPin size={13} />
-                杭州 · 城市轻旅行
+                {activeReq.city} · 城市轻旅行
               </span>
               <h2>
                 {plan
                   ? `${activeReq.days} 天，把日子过得松弛一点`
-                  : "你的杭州小旅行"}
+                  : `你的${activeReq.city}小旅行`}
               </h2>
               <p>
                 {plan
@@ -831,7 +1040,7 @@ export default function App() {
                     DAY {String(i + 1).padStart(2, "0")}
                     <span>
                       {i === 0
-                        ? "初见杭州"
+                        ? `初见${activeReq.city}`
                         : i === 1
                           ? "再走走看"
                           : "不急着告别"}
@@ -1058,7 +1267,8 @@ export default function App() {
             <aside className="insights-column">
               <RouteMap
                 day={day}
-                places={places}
+                places={planPlaces}
+                cityName={activeReq.city}
                 hotel={activeReq.hotel}
                 selected={selectedPlace}
                 onSelect={setSelectedPlace}
@@ -1159,6 +1369,13 @@ export default function App() {
           </footer>
         </div>
       </main>
+      {settingsOpen && (
+        <ApiSettings
+          config={config}
+          onSave={saveSettings}
+          onClose={() => setSettingsOpen(false)}
+        />
+      )}
       {versions && (
         <div className="modal-backdrop" onClick={() => setVersions(null)}>
           <section

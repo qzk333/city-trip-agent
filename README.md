@@ -40,35 +40,28 @@ npm run dev
 4. 刷新页面继续查看，打开版本记录恢复历史安排。
 5. 将结束时间改成 09:10 后生成新行程，观察无法满足条件时如何阻止保存。
 
-## 可选真实服务配置
+## 目的地与用户 API 配置
 
-将根目录 `.env.example` 复制为 `.env`。两个模式互相独立，修改后重启后端。
+目的地支持国家/地区 → 省份、州或行政区 → 城市三级下拉，并可在当前行政区检索中文或英文城市名。地理目录在本地提供，不需要地图 Key；切换城市会清空旧地点、预约与目录引用，并使用目的地当地时区。
 
-```dotenv
-# 使用高德交通与天气查询
-TOOL_PROVIDER=amap
-AMAP_API_KEY=填写服务端Web服务Key
+点击页面右上角「API 设置」，填写自己的服务信息：
 
-# 模型通过工具查询演示目录，然后输出候选排序
-PLANNING_MODE=llm
-LLM_BASE_URL=填写兼容ChatCompletions的服务地址前缀
-LLM_API_KEY=填写模型Key
-LLM_MODEL=填写模型名称
-```
+- 模型：选择使用模型，填写公开 HTTPS 服务地址、模型名称、API Key。程序追加 `/chat/completions`，服务需支持工具调用和 JSON 输出。
+- 高德：填写 Web 服务 Key 后，在目的地下面点击「查询城市真实地点」，再选择想去的地方。加载的 POI 与这次旅行一同保存，后续调整使用同一目录。
+- 浏览器地图：可选填单独的 JS API Key 与安全密钥；未填时保留路线示意。修改浏览器地图凭据后页面会刷新。
+- 可分别测试模型和高德连接。模型连接测试只验证基础响应，工具兼容性在实际规划时检查；测试及规划会消耗用户自己的额度。
 
-程序向 `LLM_BASE_URL` 追加 `/chat/completions`；模型服务需支持 `tools`、`tool_choice` 与 JSON 对象输出。模型不会负责数值排程，也不会获准修改硬约束。
+配置只保存于当前标签页的 `sessionStorage`，不写入 `localStorage`、行程、任务或数据库。可一键清除；不同浏览器会话的配置互不覆盖。Key 经当前请求交给后端用于转发；对外部署应使用 HTTPS。
 
-即使接入真实交通工具，地点营业时间等仍来自演示夹具；页面会继续显示待核验提示。没有 Key 或调用失败时返回明确错误，不静默使用演示路线。
+**网页请求不会继承服务器 `.env` 中的模型、地图 Key。** 没有用户配置时固定使用演示模式。原有环境凭据仅供明确执行的命令行工具验证。
 
-若需要真实地图，将 `frontend/.env.example` 复制为 `frontend/.env`，填写高德 JS API Key 与对应安全配置，再重启前端。未配置时使用标注为“非导航地图”的示意图。浏览器 Key 与服务端 Key 分开配置。
+模型自定义地址仅支持公开 HTTPS/443，不接受内网、账号或查询参数。服务端将校验后的公网 IP 用于连接，并保留原域名的 TLS SNI 与 Host，不跟随跳转。
 
-执行真实接口冒烟检查：
+地理目录覆盖全球国家/地区，但当前高德适配器接入的是中国大陆标准接口。境外可选择目的地并体验示意排程，真实地点、路线与天气暂不支持。杭州保留原演示夹具；其他城市未查询真实地图时使用明确标注的占位活动，不冒充景点。真实 POI 的营业、预约和建议停留时间仍需核实。
 
-```powershell
-& backend/.venv/Scripts/python.exe scripts/smoke_tools.py
-```
+目录来源与数据许可见 [地理数据说明](data/geography/ATTRIBUTION.md)，固定版本与转换脚本支持复现。目录包含城市、城镇及部分区级地点，数据覆盖不等于地图服务覆盖。
 
-未配置的提供方会显示 `SKIPPED`，不代表验证通过。已配置的真实模型请求会消耗服务额度。
+命令行提供方检查仍可通过根目录 `.env` 显式配置后执行 `backend/.venv/Scripts/python.exe scripts/smoke_tools.py`；它与网页配置独立，未配置的提供方显示 `SKIPPED`。
 
 ## 测试与评测
 
@@ -106,13 +99,16 @@ npm run test:e2e
 | --- | --- |
 | `backend/app/agent.py` | LangGraph 阶段编排 |
 | `backend/app/llm.py` | 有界模型工具循环、允许列表和候选校验 |
-| `backend/app/tools.py` | 演示与高德路线/天气适配 |
+| `backend/app/tools.py` | 演示、高德城市地点、坐标、路线与天气适配 |
+| `backend/app/geography.py` | 国家、省州、城市目录与归属校验 |
+| `backend/app/user_config.py` | 用户请求凭据与模型公网转发 |
 | `backend/app/planner.py` | 固定活动分段与启发式排程 |
 | `backend/app/validation.py` | 独立约束检查 |
 | `backend/app/services.py` | 任务、预览、幂等确认与版本事务 |
 | `backend/migrations/` | Alembic 数据库迁移 |
 | `frontend/src/` | 表单、时间轴、地图、修改预览与版本交互 |
 | `data/curated/` | 自建演示地点夹具 |
+| `data/geography/` | 固定版本的地理目录及来源许可 |
 | `evals/datasets/` | 固定排程冒烟任务 |
 | `scripts/` | 安装、启动、评测与真实工具检查 |
 

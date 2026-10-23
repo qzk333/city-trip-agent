@@ -2,23 +2,28 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 
+from alembic import command
+from alembic.config import Config
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select, update
+from sqlalchemy import inspect, select, update
 
-from app.catalog import CATALOG
-from app.config import Settings, get_settings
-from app.database import Base, ProposalRecord, RunRecord, TripRecord, VersionRecord, build_database
-from app.schemas import ApplyRequest, ProposalRequest, Requirements, RestoreRequest
+from app.catalog import demo_catalog
+from app.config import ROOT, Settings, get_settings
+from app.database import CatalogRecord, ProposalRecord, RunRecord, TripRecord, VersionRecord, build_database
+from app.geography import DEFAULT_CITY_ID, get_city, grouped_cities, regions
+from app.schemas import ApplyRequest, CityQuery, ConnectionTest, ProposalRequest, Requirements, RestoreRequest
 from app.services import (
     apply_snapshot,
-    check_places,
     current_itinerary,
     execute_run,
+    prepare_trip,
     require_trip,
     trip_view,
 )
+from app.tools import ToolUnavailable, TravelTools
+from app.user_config import request_settings, test_model_connection
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -27,9 +32,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        # M1 local bootstrap. PostgreSQL deployments should use Alembic migrations.
+        # Upgrade the local schema as features grow. PostgreSQL uses the explicit CLI migration.
         if settings.database_url.startswith("sqlite"):
-            Base.metadata.create_all(engine)
+            config = Config(str(ROOT / "backend/alembic.ini"))
+            config.attributes["database_url"] = settings.database_url
+            tables = set(inspect(engine).get_table_names())
+            if "trips" in tables and "alembic_version" not in tables:
+                columns = {c["name"] for c in inspect(engine).get_columns("trips")}
+                if columns != {"id", "requirements", "current_version", "created_at"}:
+                    raise RuntimeError("无法识别本地旧数据库版本，请先备份并检查迁移状态")
+                command.stamp(config, "0001")
+            command.upgrade(config, "head")
         with factory.begin() as db:
             db.execute(
                 update(RunRecord)
@@ -50,24 +63,99 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.session_factory = factory
 
     @app.get("/api/health")
-    def health():
+    def health(request: Request):
+        runtime = request_settings(settings, request)
         return {
             "status": "ok",
-            "tool_provider": settings.tool_provider,
-            "planning_mode": settings.planning_mode,
+            "tool_provider": runtime.tool_provider,
+            "planning_mode": runtime.planning_mode,
             "catalog_mode": "demo",
-            "llm_configured": bool(settings.llm_base_url and settings.llm_api_key and settings.llm_model),
+            "llm_configured": bool(runtime.llm_base_url and runtime.llm_api_key and runtime.llm_model),
+            "credential_policy": "user_supplied_only",
         }
 
+    @app.get("/api/geography/countries")
+    def countries():
+        return sorted(regions()["countries"], key=lambda c: (c["code"] != "CN", c["name"]))
+
+    @app.get("/api/geography/states")
+    def states(country_code: str = Query(pattern="^[A-Z]{2}$")):
+        return [
+            {**state, "city_count": len(grouped_cities().get(state["id"], []))}
+            for state in regions()["states"]
+            if state["country_code"] == country_code and grouped_cities().get(state["id"])
+        ]
+
+    @app.get("/api/geography/cities")
+    def cities(
+        state_id: str = Query(max_length=30),
+        q: str = Query(default="", max_length=100),
+        limit: int = Query(default=500, ge=1, le=5000),
+    ):
+        matches = [
+            c
+            for c in grouped_cities().get(state_id, [])
+            if q.casefold() in c["name"].casefold() or q.casefold() in c["english_name"].casefold()
+        ]
+        return {"items": matches[:limit], "total": len(matches)}
+
+    @app.get("/api/geography/cities/{city_id}")
+    def city(city_id: int):
+        try:
+            return get_city(city_id)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
     @app.get("/api/places")
-    def places(q: str = Query(default="", max_length=100)):
-        return [p.model_dump() for p in CATALOG.values() if q in p.name or q in p.description]
+    def places(q: str = Query(default="", max_length=100), city_id: int = DEFAULT_CITY_ID):
+        try:
+            catalog = demo_catalog(city_id)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        return [p.model_dump() for p in catalog.values() if q in p.name or q in p.description]
+
+    @app.post("/api/places/discover")
+    def discover(body: CityQuery, request: Request):
+        runtime = request_settings(settings, request)
+        try:
+            destination = get_city(body.city_id)
+            tools = TravelTools(runtime, destination["name"], destination["country_code"])
+            result = tools.discover(destination)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        except ToolUnavailable as exc:
+            raise HTTPException(400, str(exc)) from exc
+        with factory.begin() as db:
+            snapshot = CatalogRecord(city_id=body.city_id, places=result["places"])
+            db.add(snapshot)
+            db.flush()
+            return {
+                "catalog_id": snapshot.id,
+                "places": list(result["places"].values()),
+                "center": result["center"],
+            }
+
+    @app.post("/api/settings/test")
+    def test_connection(body: ConnectionTest, request: Request):
+        runtime = request_settings(settings, request)
+        if body.service == "model":
+            return test_model_connection(runtime)
+        if runtime.tool_provider != "amap":
+            raise HTTPException(400, "请先选择使用自己的高德 Key")
+        try:
+            TravelTools(runtime)._get("/v3/config/district", {"keywords": "中国", "subdistrict": 0})
+        except ToolUnavailable as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"ok": True, "message": "高德 Web 服务已响应；其他接口权限会在使用时进一步检查。"}
 
     @app.post("/api/trips", status_code=201)
     def create_trip(requirements: Requirements):
-        check_places(requirements)
         with factory.begin() as db:
-            trip = TripRecord(requirements=requirements.model_dump(mode="json"))
+            requirements, catalog = prepare_trip(db, requirements)
+            trip = TripRecord(
+                requirements=requirements.model_dump(mode="json"),
+                catalog={key: p.model_dump() for key, p in catalog.items()},
+            )
             db.add(trip)
             db.flush()
             return trip_view(db, trip)
@@ -78,18 +166,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return trip_view(db, require_trip(db, trip_id))
 
     @app.post("/api/trips/{trip_id}/plan-runs", status_code=202)
-    def plan_trip(trip_id: str, background: BackgroundTasks):
+    def plan_trip(trip_id: str, background: BackgroundTasks, request: Request):
+        runtime = request_settings(settings, request)
         with factory.begin() as db:
             trip = require_trip(db, trip_id)
             run = RunRecord(trip_id=trip_id, base_version=trip.current_version)
             db.add(run)
             db.flush()
             run_id = run.id
-        background.add_task(execute_run, factory, settings, run_id)
+        background.add_task(execute_run, factory, runtime, run_id)
         return {"run_id": run_id}
 
     @app.post("/api/trips/{trip_id}/proposals", status_code=202)
-    def propose(trip_id: str, body: ProposalRequest, background: BackgroundTasks):
+    def propose(trip_id: str, body: ProposalRequest, background: BackgroundTasks, request: Request):
+        runtime = request_settings(settings, request)
         with factory.begin() as db:
             trip = require_trip(db, trip_id)
             if trip.current_version != body.base_version:
@@ -115,7 +205,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             db.add(run)
             db.flush()
             run_id = run.id
-        background.add_task(execute_run, factory, settings, run_id, body)
+        background.add_task(execute_run, factory, runtime, run_id, body)
         return {"run_id": run_id}
 
     @app.get("/api/runs/{run_id}")

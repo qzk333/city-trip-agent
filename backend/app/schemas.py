@@ -10,9 +10,9 @@ class Schema(BaseModel):
 
 class Location(Schema):
     name: str = Field(min_length=1, max_length=100)
-    longitude: float = Field(ge=119, le=121)
-    latitude: float = Field(ge=29, le=31)
-    coordinate_system: Literal["GCJ-02"] = "GCJ-02"
+    longitude: float = Field(ge=-180, le=180)
+    latitude: float = Field(ge=-90, le=90)
+    coordinate_system: Literal["GCJ-02", "WGS84"] = "GCJ-02"
 
 
 class Appointment(Schema):
@@ -24,14 +24,21 @@ class Appointment(Schema):
     @model_validator(mode="after")
     def ordered(self):
         if any(t.second or t.microsecond or t.tzinfo is not None for t in (self.start, self.end)):
-            raise ValueError("时间请按北京时间填写到分钟，不带时区偏移")
+            raise ValueError("请按目的地当地时间填写到分钟，不带时区偏移")
         if self.end <= self.start:
             raise ValueError("预约结束时间必须晚于开始时间")
         return self
 
 
 class Requirements(Schema):
-    city: Literal["杭州"] = "杭州"
+    city: str = Field(default="杭州", min_length=1, max_length=100)
+    country_code: str = Field(default="CN", pattern="^[A-Z]{2}$")
+    country: str = "中国"
+    state_id: str = Field(default="CN-ZJ", min_length=1, max_length=30)
+    province: str = "浙江省"
+    city_id: int | None = None
+    timezone: str = "Asia/Shanghai"
+    catalog_id: str | None = Field(default=None, max_length=32)
     start_date: date
     days: int = Field(default=1, ge=1, le=3)
     day_start: time = time(9)
@@ -56,7 +63,7 @@ class Requirements(Schema):
     @model_validator(mode="after")
     def valid_window(self):
         if any(t.second or t.microsecond or t.tzinfo is not None for t in (self.day_start, self.day_end)):
-            raise ValueError("时间请按北京时间填写到分钟，不带时区偏移")
+            raise ValueError("请按目的地当地时间填写到分钟，不带时区偏移")
         if self.day_end <= self.day_start:
             raise ValueError("每日结束时间必须晚于开始时间；初版不支持跨夜日程")
         if len(self.must_visit) != len(set(self.must_visit)):
@@ -72,7 +79,7 @@ class Place(Schema):
     subtitle: str
     longitude: float
     latitude: float
-    coordinate_system: Literal["GCJ-02"] = "GCJ-02"
+    coordinate_system: Literal["GCJ-02", "WGS84"] = "GCJ-02"
     category: Literal["nature", "culture", "coffee", "city"]
     indoor: bool
     duration_minutes: int = Field(gt=0)
@@ -155,3 +162,11 @@ class ApplyRequest(Schema):
 
 class RestoreRequest(ApplyRequest):
     pass
+
+
+class CityQuery(Schema):
+    city_id: int
+
+
+class ConnectionTest(Schema):
+    service: Literal["model", "amap"]

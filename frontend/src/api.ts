@@ -1,8 +1,11 @@
+import { getBrowserConfig, requestConfigHeader } from "./userConfig";
+import type { UserAPIConfig } from "./userConfig";
+
 export interface Location {
   name: string;
   longitude: number;
   latitude: number;
-  coordinate_system: "GCJ-02";
+  coordinate_system: "GCJ-02" | "WGS84";
 }
 export interface Place extends Location {
   id: string;
@@ -18,7 +21,14 @@ export interface Place extends Location {
   fixture: boolean;
 }
 export interface Requirements {
-  city: "杭州";
+  city: string;
+  country_code: string;
+  country: string;
+  state_id: string;
+  province: string;
+  city_id: number | null;
+  timezone: string;
+  catalog_id: string | null;
   start_date: string;
   days: number;
   day_start: string;
@@ -100,6 +110,7 @@ export interface Trip {
   current_version: number;
   itinerary: Itinerary | null;
   latest_run_id: string | null;
+  places: Place[];
 }
 export interface RunEvent {
   id: number;
@@ -127,17 +138,19 @@ export interface Version {
 }
 export type Action = "delay" | "lock" | "unlock" | "remove" | "indoor";
 
-export async function api<T>(path: string, body?: unknown): Promise<T> {
-  const response = await fetch(
-    `/api${path}`,
-    body === undefined
-      ? undefined
-      : {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        },
-  );
+export async function api<T>(
+  path: string,
+  body?: unknown,
+  config?: UserAPIConfig,
+): Promise<T> {
+  const response = await fetch(`/api${path}`, {
+    method: body === undefined ? "GET" : "POST",
+    headers: {
+      "X-Travel-Config": requestConfigHeader(config || getBrowserConfig()),
+      ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     const detail = payload.detail;
@@ -150,6 +163,31 @@ export async function api<T>(path: string, body?: unknown): Promise<T> {
     );
   }
   return payload as T;
+}
+
+export interface Country {
+  code: string;
+  name: string;
+  english_name: string;
+}
+export interface Region {
+  id: string;
+  country_code: string;
+  name: string;
+  city_count: number;
+}
+export interface Destination {
+  id: number;
+  country_code: string;
+  state_id: string;
+  name: string;
+  english_name: string;
+  longitude: number;
+  latitude: number;
+  timezone: string | null;
+  coordinate_system: "WGS84";
+  country?: string;
+  state?: string;
 }
 
 export async function waitForRun(

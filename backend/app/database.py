@@ -23,6 +23,7 @@ class TripRecord(Base):
     __tablename__ = "trips"
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
     requirements: Mapped[dict] = mapped_column(JSON)
+    catalog: Mapped[dict] = mapped_column(JSON, default=dict, server_default="{}")
     current_version: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[str] = mapped_column(String(40), default=now)
 
@@ -69,6 +70,14 @@ class ActionRecord(Base):
     key: Mapped[str] = mapped_column(String(100))
     resource: Mapped[str] = mapped_column(String(100))
     version: Mapped[int] = mapped_column(Integer)
+
+
+class CatalogRecord(Base):
+    __tablename__ = "catalogs"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    city_id: Mapped[int] = mapped_column(Integer)
+    places: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[str] = mapped_column(String(40), default=now)
 
 
 def build_database(settings: Settings):

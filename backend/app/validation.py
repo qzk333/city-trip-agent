@@ -2,12 +2,18 @@ from datetime import timedelta
 
 from app.catalog import CATALOG
 from app.planner import TRANSFER_BUFFER, minutes
-from app.schemas import Check, Itinerary, Requirements
+from app.schemas import Check, Itinerary, Place, Requirements
 
 
-def validate_itinerary(req: Requirements, itinerary: Itinerary, overrides: dict | None = None) -> Itinerary:
+def validate_itinerary(
+    req: Requirements,
+    itinerary: Itinerary,
+    overrides: dict | None = None,
+    catalog: dict[str, Place] | None = None,
+) -> Itinerary:
     """Validate a completed candidate independently of the scheduling search."""
     overrides = overrides or {}
+    catalog = catalog if catalog is not None else CATALOG
     checks = list(itinerary.checks)
 
     def error(code: str, message: str, activity_id: str | None = None):
@@ -46,7 +52,7 @@ def validate_itinerary(req: Requirements, itinerary: Itinerary, overrides: dict 
                 error("late_arrival", "上一段交通后无法按时到达该活动", activity.id)
             if activity.day != day.day or end <= start or end > minutes(req.day_end):
                 error("invalid_window", "活动时间或所属日期超出允许范围", activity.id)
-            place = CATALOG.get(activity.place_id)
+            place = catalog.get(activity.place_id)
             if place is None:
                 error("unknown_place", "活动使用了目录以外的地点", activity.id)
             elif (place.opening and start < minutes(place.opening)) or (
@@ -62,7 +68,7 @@ def validate_itinerary(req: Requirements, itinerary: Itinerary, overrides: dict 
     visited = {a.place_id for a in all_activities}
     for place_id in req.must_visit:
         if place_id not in visited:
-            error("missing_required", f"必去地点尚未排入：{CATALOG[place_id].name}")
+            error("missing_required", f"必去地点尚未排入：{catalog[place_id].name}")
     for index, appointment in enumerate(req.appointments):
         expected_id = f"d{appointment.day}-{appointment.place_id}-fixed{index}"
         actual = next((a for a in all_activities if a.id == expected_id), None)

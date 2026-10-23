@@ -5,7 +5,7 @@ from app.config import get_settings
 from app.database import Base
 
 target_metadata = Base.metadata
-database_url = get_settings().database_url
+database_url = context.config.attributes.get("database_url") or get_settings().database_url
 
 if context.is_offline_mode():
     context.configure(url=database_url, target_metadata=target_metadata, literal_binds=True)

@@ -20,7 +20,8 @@ def model_settings():
     )
 
 
-def test_model_tool_round_trip_and_structured_output(monkeypatch, requirements):
+@pytest.mark.parametrize("input_count", [100, "provider-text-must-not-persist"])
+def test_model_tool_round_trip_and_structured_output(monkeypatch, requirements, input_count):
     requests = []
     responses = [
         {
@@ -46,7 +47,7 @@ def test_model_tool_round_trip_and_structured_output(monkeypatch, requirements):
             200,
             json={
                 "choices": [{"message": responses.pop(0)}],
-                "usage": {"prompt_tokens": 100, "completion_tokens": 30},
+                "usage": {"prompt_tokens": input_count, "completion_tokens": 30},
             },
             request=httpx.Request("POST", url),
         )
@@ -59,6 +60,11 @@ def test_model_tool_round_trip_and_structured_output(monkeypatch, requirements):
     assert json.loads(tool_message["content"])["places"][0]["id"] == "westlake"
     assert any(t["tool"] == "search_places" for t in result.trace)
     assert result.planning_mode == "llm"
+    assert all(
+        t["input_tokens"] == (100 if type(input_count) is int else None)
+        for t in result.trace
+        if t["tool"] == "llm_candidates"
+    )
     assert not [c for c in result.checks if c.severity == "error"]
 
 

@@ -6,9 +6,18 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
 from app.agent import generate
-from app.catalog import CATALOG
-from app.database import ActionRecord, ProposalRecord, RunRecord, TripRecord, VersionRecord, now
-from app.schemas import Itinerary, ProposalRequest, Requirements
+from app.catalog import CATALOG, decode_catalog, demo_catalog
+from app.database import (
+    ActionRecord,
+    CatalogRecord,
+    ProposalRecord,
+    RunRecord,
+    TripRecord,
+    VersionRecord,
+    now,
+)
+from app.geography import DEFAULT_CITY_ID, get_city, validate_destination
+from app.schemas import Itinerary, Location, ProposalRequest, Requirements
 from app.tools import ToolUnavailable
 from app.validation import validate_itinerary
 
@@ -20,10 +29,39 @@ def require_trip(db, trip_id: str) -> TripRecord:
     return trip
 
 
-def check_places(req: Requirements):
+def check_places(req: Requirements, catalog=None):
+    catalog = catalog if catalog is not None else CATALOG
     ids = [*req.must_visit, *(a.place_id for a in req.appointments)]
-    if any(place_id not in CATALOG for place_id in ids):
+    if any(place_id not in catalog for place_id in ids):
         raise HTTPException(422, "存在未确认的地点，请从地点目录选择")
+
+
+def prepare_trip(db, req: Requirements):
+    try:
+        normalized = validate_destination(req)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    city = get_city(normalized.city_id)
+    if "hotel" not in req.model_fields_set and city["id"] != DEFAULT_CITY_ID:
+        normalized = normalized.model_copy(
+            update={
+                "hotel": Location(
+                    name=f"参考起点 · {city['name']}",
+                    longitude=city["longitude"],
+                    latitude=city["latitude"],
+                    coordinate_system="WGS84",
+                )
+            }
+        )
+    if normalized.catalog_id:
+        snapshot = db.get(CatalogRecord, normalized.catalog_id)
+        if snapshot is None or snapshot.city_id != normalized.city_id:
+            raise HTTPException(422, "地点目录与目的地不匹配，请重新加载城市地点")
+        catalog = decode_catalog(snapshot.places, normalized.city_id)
+    else:
+        catalog = demo_catalog(normalized.city_id)
+    check_places(normalized, catalog)
+    return normalized, catalog
 
 
 def current_itinerary(db, trip: TripRecord) -> dict | None:
@@ -46,6 +84,9 @@ def trip_view(db, trip: TripRecord) -> dict:
         "current_version": trip.current_version,
         "itinerary": current_itinerary(db, trip),
         "latest_run_id": latest_run.id if latest_run else None,
+        "places": [
+            p.model_dump() for p in decode_catalog(trip.catalog, trip.requirements.get("city_id")).values()
+        ],
     }
 
 
@@ -81,6 +122,7 @@ def execute_run(factory, settings, run_id: str, request: ProposalRequest | None 
             run.status = "running"
             trip = require_trip(db, run.trip_id)
             requirements = Requirements(**trip.requirements)
+            catalog = decode_catalog(trip.catalog, requirements.city_id)
             # A concurrent confirmation must not change the baseline of this run.
             version = db.scalar(
                 select(VersionRecord).where(
@@ -120,9 +162,9 @@ def execute_run(factory, settings, run_id: str, request: ProposalRequest | None 
                         for a in d["activities"]
                         if a["id"] != target["id"]
                     ]
-                result = generate(requirements, settings, emit, overrides)
+                result = generate(requirements, settings, emit, overrides, catalog)
         else:
-            result = generate(requirements, settings, emit)
+            result = generate(requirements, settings, emit, catalog=catalog)
         emit("completed", "结果已生成，请检查待确认信息和修改预览")
         with factory.begin() as db:
             run = db.get(RunRecord, run_id)
@@ -169,7 +211,11 @@ def apply_snapshot(
         raise HTTPException(409, "该调整已取消，请重新生成方案")
     if trip.current_version != base_version:
         raise HTTPException(409, "行程版本已经变化，请加载最新版本后重新操作")
-    validated = validate_itinerary(Requirements(**trip.requirements), Itinerary(**itinerary))
+    validated = validate_itinerary(
+        Requirements(**trip.requirements),
+        Itinerary(**itinerary),
+        catalog=decode_catalog(trip.catalog, trip.requirements.get("city_id")),
+    )
     if any(c.severity == "error" for c in validated.checks):
         raise HTTPException(422, "方案仍有未解决的约束或路线问题，不能确认为可执行行程")
     if validated.status in ("CONFLICT", "NO_SOLUTION_WITHIN_LIMIT"):

@@ -1,7 +1,7 @@
 from datetime import time, timedelta
 
 from app.catalog import CATALOG
-from app.schemas import Activity, Check, DayPlan, Itinerary, Requirements
+from app.schemas import Activity, Check, DayPlan, Itinerary, Place, Requirements
 from app.tools import ToolUnavailable, TravelTools, distance_meters
 
 TRANSFER_BUFFER = 10
@@ -16,7 +16,14 @@ def clock(value: int) -> str:
     return f"{value // 60:02d}:{value % 60:02d}"
 
 
-def build_plan(req: Requirements, order: list[str], tools: TravelTools, overrides: dict) -> Itinerary:
+def build_plan(
+    req: Requirements,
+    order: list[str],
+    tools: TravelTools,
+    overrides: dict,
+    catalog: dict[str, Place] | None = None,
+) -> Itinerary:
+    catalog = catalog if catalog is not None else CATALOG
     checks = [
         Check(
             code="fixture_data",
@@ -29,6 +36,12 @@ def build_plan(req: Requirements, order: list[str], tools: TravelTools, override
             message=("交通为估计值；景区内部步行、排队、预约及票务需另行确认。"),
         ),
     ]
+    if not any(p.fixture for p in catalog.values()):
+        checks[0] = Check(
+            code="opening_hours_missing",
+            severity="warning",
+            message="地点来自本次地图查询；营业时间、预约与建议停留时间尚未核实。",
+        )
     weather = tools.weather(req.start_date, req.days)
     if weather.status != "ok":
         checks.append(
@@ -88,15 +101,15 @@ def build_plan(req: Requirements, order: list[str], tools: TravelTools, override
             for anchor in [*appointments, None]:
                 limit = minutes(anchor.start) if anchor else day_end
                 anchor_id = anchor.place_id if anchor else "hotel"
-                anchor_place = CATALOG[anchor_id] if anchor else req.hotel
+                anchor_place = catalog[anchor_id] if anchor else req.hotel
                 while len(activities) < cap:
                     candidates = [
                         p
                         for p in candidate_ids
-                        if p not in visited and p not in fixed_places and p not in excluded and p in CATALOG
+                        if p not in visited and p not in fixed_places and p not in excluded and p in catalog
                     ]
                     if overrides.get("indoor"):
-                        candidates = [p for p in candidates if CATALOG[p].indoor or p in req.must_visit]
+                        candidates = [p for p in candidates if catalog[p].indoor or p in req.must_visit]
                     if "allowed_place_ids" in overrides:
                         candidates = [p for p in candidates if p in overrides["allowed_place_ids"]]
                     candidates.sort(
@@ -105,13 +118,13 @@ def build_plan(req: Requirements, order: list[str], tools: TravelTools, override
                             candidate_ids.index(p)
                             if overrides.get("preferred") or tools.settings.planning_mode == "llm"
                             else 0,
-                            CATALOG[p].category not in req.interests,
-                            distance_meters(origin, CATALOG[p]),
+                            catalog[p].category not in req.interests,
+                            distance_meters(origin, catalog[p]),
                         )
                     )
                     selected = None
                     for place_id in candidates:
-                        place = CATALOG[place_id]
+                        place = catalog[place_id]
                         leg = tools.route(origin_id, origin, place_id, place, req.transport)
                         begin = max(
                             cursor + leg.duration_minutes + TRANSFER_BUFFER,
@@ -152,7 +165,7 @@ def build_plan(req: Requirements, order: list[str], tools: TravelTools, override
                     legs.append(leg)
                     activities.append(anchor)
                     visited.add(anchor.place_id)
-                    origin_id, origin, cursor = anchor.place_id, CATALOG[anchor.place_id], minutes(anchor.end)
+                    origin_id, origin, cursor = anchor.place_id, catalog[anchor.place_id], minutes(anchor.end)
                 elif activities:
                     legs.append(leg)
         except ToolUnavailable as exc:
