@@ -61,6 +61,12 @@ def regions() -> dict:
 
 
 @lru_cache(maxsize=1)
+def mainland_cities() -> list[dict]:
+    snapshot = json.loads((ROOT / "data/geography/china-cities.json").read_text(encoding="utf-8"))
+    return snapshot["cities"]
+
+
+@lru_cache(maxsize=1)
 def city_index() -> dict[int, dict]:
     raw = json.loads(gzip.decompress((ROOT / "data/geography/cities.json.gz").read_bytes()))
     result = {}
@@ -93,26 +99,23 @@ def city_index() -> dict[int, dict]:
             "timezone": timezone or None,
             "coordinate_system": "WGS84",
         }
-    # The upstream snapshot has Shanghai districts but lacks the municipality itself.
-    # This explicit local addition is a reference centre, not a verified hotel or POI.
-    result[-310000] = {
-        "id": -310000,
-        "country_code": "CN",
-        "state_id": "CN-SH",
-        "name": "上海",
-        "english_name": "Shanghai",
-        "longitude": 121.4737,
-        "latitude": 31.2304,
-        "timezone": "Asia/Shanghai",
-        "coordinate_system": "WGS84",
-    }
+    # Preserve original IDs for saved trips, but use normalized Chinese city names.
+    # Shanghai/Tianjin have explicit local reference centres, not verified hotels.
+    for city in mainland_cities():
+        result[city["id"]] = {**city, "country_code": "CN"}
     return result
 
 
 @lru_cache(maxsize=1)
 def grouped_cities() -> dict[str, list[dict]]:
     result: dict[str, list[dict]] = {}
+    mainland_ids = {city["id"] for city in mainland_cities()}
+    mainland_states = {city["state_id"] for city in mainland_cities()}
     for city in city_index().values():
+        # The global source mixes cities, districts and villages. Only expose the
+        # reviewed prefecture-level list in mainland dropdowns; legacy IDs still resolve.
+        if city["state_id"] in mainland_states and city["id"] not in mainland_ids:
+            continue
         result.setdefault(city["state_id"], []).append(city)
     for values in result.values():
         values.sort(key=lambda c: (c["name"] == c["english_name"], c["name"]))

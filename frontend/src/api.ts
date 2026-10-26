@@ -1,4 +1,10 @@
-import { getBrowserConfig, requestConfigHeader } from "./userConfig";
+import {
+  clearLegacyBrowserConfig,
+  emptyConfig,
+  getLegacyBrowserConfig,
+  requestConfigHeader,
+  setRuntimeConfig,
+} from "./userConfig";
 import type { UserAPIConfig } from "./userConfig";
 
 export interface Location {
@@ -34,12 +40,23 @@ export interface Requirements {
   day_start: string;
   day_end: string;
   hotel: Location;
-  transport: "transit" | "walking";
+  lodging_mode?: "fixed" | "route_first";
+  arrival?: TravelBoundary | null;
+  departure?: TravelBoundary | null;
+  day_windows?: Record<string, { start: string; end: string }>;
+  place_days?: Record<string, number>;
+  transport: "auto" | "transit" | "walking";
+  use_web_guides: boolean;
   pace: "relaxed" | "balanced";
   interests: Place["category"][];
   must_visit: string[];
   appointments: { place_id: string; day: number; start: string; end: string }[];
   note: string;
+}
+export interface TravelBoundary {
+  location: Location;
+  time: string;
+  buffer_minutes: number;
 }
 export interface Activity {
   id: string;
@@ -59,6 +76,10 @@ export interface RouteLeg {
   provider: string;
   estimated: boolean;
   evidence: string;
+  mode?: "walking" | "transit" | "driving" | "unknown";
+  recommendation?: string;
+  source_ids?: string[];
+  route_status?: "queried" | "estimated";
 }
 export interface DayPlan {
   day: number;
@@ -95,11 +116,60 @@ export interface Itinerary {
   planning_mode: string;
   tool_provider: string;
   day_start_offsets: Record<string, number>;
+  lodging?: HotelResearch;
+  revision_note?: string;
+  revision_rounds?: number;
+  revision_changes?: string[];
+  revision_status?:
+    "not_requested" | "model_reviewed" | "rules_only" | "unavailable";
+  guides?: {
+    status: "ok" | "partial" | "unavailable" | "not_requested";
+    note: string;
+    fetched_at: string;
+    sources: { id: string; title: string; url: string; content_kind: string }[];
+  };
+}
+export interface HotelCandidate {
+  id: string;
+  location: Location;
+  address: string;
+  provider: "amap" | "demo" | "user";
+  source_url: string;
+  observed_at: string;
+  evening_distance_meters: number;
+  morning_distance_meters: number;
+  evening_minutes: number;
+  morning_minutes: number;
+  reason: string;
+  price_note: string;
+}
+export interface HotelNight {
+  night: number;
+  checkin: string;
+  checkout: string;
+  last_place_id: string;
+  next_place_id: string;
+  candidates: HotelCandidate[];
+  selected_id: string | null;
+  note: string;
+}
+export interface HotelResearch {
+  status: "not_requested" | "not_needed" | "ready" | "partial" | "unavailable";
+  nights: HotelNight[];
+  note: string;
+  analysis_status: "not_requested" | "ok" | "unavailable";
+}
+export interface HotelChoice {
+  night: number;
+  candidate_id?: string;
+  custom_location?: Location;
 }
 export interface Proposal {
   id: string;
   base_version: number;
   itinerary: Itinerary;
+  requirements?: Requirements | null;
+  places?: Place[];
   label: string;
   applied_version: number | null;
   dismissed: boolean;
@@ -142,14 +212,16 @@ export async function api<T>(
   path: string,
   body?: unknown,
   config?: UserAPIConfig,
+  options?: { signal?: AbortSignal },
 ): Promise<T> {
   const response = await fetch(`/api${path}`, {
     method: body === undefined ? "GET" : "POST",
     headers: {
-      "X-Travel-Config": requestConfigHeader(config || getBrowserConfig()),
+      ...(config ? { "X-Travel-Config": requestConfigHeader(config) } : {}),
       ...(body === undefined ? {} : { "Content-Type": "application/json" }),
     },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    signal: options?.signal,
   });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -163,6 +235,55 @@ export async function api<T>(
     );
   }
   return payload as T;
+}
+
+interface ProjectConfig {
+  config: UserAPIConfig;
+  exists: boolean;
+  path: string;
+}
+
+let configBootstrap: Promise<ProjectConfig> | null = null;
+
+export function loadProjectConfig(): Promise<ProjectConfig> {
+  if (configBootstrap) return configBootstrap;
+  configBootstrap = (async () => {
+    let saved = await api<ProjectConfig>("/settings/local");
+    if (!saved.exists) {
+      const legacy = getLegacyBrowserConfig();
+      if (legacy) {
+        try {
+          saved = await api<ProjectConfig>("/settings/local", legacy);
+        } catch (error) {
+          setRuntimeConfig(legacy);
+          throw error;
+        }
+      }
+    }
+    setRuntimeConfig(saved.config);
+    clearLegacyBrowserConfig();
+    return saved;
+  })().catch((error) => {
+    configBootstrap = null;
+    throw error;
+  });
+  return configBootstrap;
+}
+
+export async function saveProjectConfig(config: UserAPIConfig) {
+  const saved = await api<ProjectConfig>("/settings/local", config);
+  setRuntimeConfig(saved.config);
+  clearLegacyBrowserConfig();
+  configBootstrap = Promise.resolve(saved);
+  return saved;
+}
+
+export async function clearProjectConfig() {
+  const saved = await api<ProjectConfig>("/settings/local/clear", {});
+  setRuntimeConfig({ ...emptyConfig });
+  clearLegacyBrowserConfig();
+  configBootstrap = Promise.resolve(saved);
+  return saved;
 }
 
 export interface Country {
@@ -194,7 +315,7 @@ export async function waitForRun(
   id: string,
   onEvents: (events: RunEvent[]) => void,
 ): Promise<Run> {
-  for (let attempt = 0; attempt < 240; attempt++) {
+  for (let attempt = 0; attempt < 360; attempt++) {
     const run = await api<Run>(`/runs/${id}`);
     onEvents(run.events);
     if (run.status === "failed")

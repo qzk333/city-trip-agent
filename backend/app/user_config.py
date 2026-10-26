@@ -11,6 +11,14 @@ from app.config import Settings
 from app.schemas import Schema
 
 
+def model_request_options(base_url: str) -> dict:
+    # DeepSeek defaults to thinking mode, which rejects tool_choice=required.
+    # This app's bounded candidate selector uses non-thinking tool calls.
+    if urlsplit(base_url).hostname == "api.deepseek.com":
+        return {"thinking": {"type": "disabled"}}
+    return {}
+
+
 class UserAPIConfig(Schema):
     tool_provider: str = Field(default="demo", pattern="^(demo|amap)$")
     planning_mode: str = Field(default="demo", pattern="^(demo|llm)$")
@@ -82,11 +90,20 @@ def public_model_post(url: str, *, headers: dict, json: dict, timeout: float) ->
 
 
 def request_settings(base: Settings, request: Request) -> Settings:
+    # Imported here to keep the config schema usable by the file store without a cycle.
+    from app.local_config import is_local_request, read_config
+
     raw = request.headers.get("x-travel-config", "")
     if len(raw) > 20000:
         raise HTTPException(400, "API 配置过长，请检查填写内容")
     try:
-        config = UserAPIConfig.model_validate(json.loads(unquote(raw))) if raw else UserAPIConfig()
+        config = (
+            UserAPIConfig.model_validate(json.loads(unquote(raw)))
+            if raw
+            else read_config(base)
+            if is_local_request(request)
+            else UserAPIConfig()
+        )
     except (ValueError, ValidationError, TypeError) as exc:
         # Never echo validation inputs: they may contain private keys.
         raise HTTPException(400, "API 配置无效，请检查模式、Key 和公开 HTTPS 模型地址") from exc
@@ -112,6 +129,7 @@ def test_model_connection(settings: Settings) -> dict:
             timeout=12,
             headers={"Authorization": f"Bearer {settings.llm_api_key}"},
             json={
+                **model_request_options(settings.llm_base_url),
                 "model": settings.llm_model,
                 "messages": [{"role": "user", "content": "Reply with OK."}],
                 "max_tokens": 16,
@@ -119,12 +137,22 @@ def test_model_connection(settings: Settings) -> dict:
         )
         if response.status_code in (401, 403):
             raise HTTPException(400, "模型认证失败，请检查自己的 Key 和访问权限")
+        if response.status_code == 404:
+            raise HTTPException(400, "模型接口不存在（404），请填写地址前缀；应用会追加 /chat/completions")
+        if response.status_code == 429:
+            raise HTTPException(400, "模型服务限流或额度不足（429），请检查服务商控制台后重试")
+        if response.status_code >= 500:
+            raise HTTPException(400, "模型服务暂时异常（5xx），请稍后重试")
         response.raise_for_status()
         data = response.json()
-        if not data.get("choices"):
+        if not isinstance(data, dict) or not isinstance(data.get("choices"), list) or not data["choices"]:
             raise ValueError
         return {"ok": True, "message": "模型已响应；工具调用兼容性会在规划时进一步检查。"}
     except HTTPException:
         raise
+    except httpx.TimeoutException as exc:
+        raise HTTPException(400, "模型响应超时，请检查网络或稍后重试") from exc
+    except httpx.ConnectError as exc:
+        raise HTTPException(400, "无法连接模型服务，请检查网络、HTTPS 证书和服务地址") from exc
     except (httpx.HTTPError, ValueError) as exc:
         raise HTTPException(400, "模型连接失败，请检查地址、模型名称和服务可用性") from exc

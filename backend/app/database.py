@@ -35,6 +35,8 @@ class VersionRecord(Base):
     trip_id: Mapped[str] = mapped_column(ForeignKey("trips.id"), index=True)
     number: Mapped[int] = mapped_column(Integer)
     itinerary: Mapped[dict] = mapped_column(JSON)
+    requirements: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    catalog: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     label: Mapped[str] = mapped_column(String(200))
     created_at: Mapped[str] = mapped_column(String(40), default=now)
 
@@ -51,12 +53,27 @@ class RunRecord(Base):
     created_at: Mapped[str] = mapped_column(String(40), default=now)
 
 
+class AgentTaskRecord(Base):
+    __tablename__ = "agent_tasks"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), index=True)
+    role: Mapped[str] = mapped_column(String(40))
+    status: Mapped[str] = mapped_column(String(20), default="running")
+    input_snapshot: Mapped[dict] = mapped_column(JSON)
+    result: Mapped[dict] = mapped_column(JSON, default=dict)
+    error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    started_at: Mapped[str] = mapped_column(String(40), default=now)
+    finished_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+
+
 class ProposalRecord(Base):
     __tablename__ = "proposals"
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
     trip_id: Mapped[str] = mapped_column(ForeignKey("trips.id"), index=True)
     base_version: Mapped[int] = mapped_column(Integer)
     itinerary: Mapped[dict] = mapped_column(JSON)
+    requirements: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    catalog: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     label: Mapped[str] = mapped_column(String(200))
     applied_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     dismissed: Mapped[bool] = mapped_column(Boolean, default=False)

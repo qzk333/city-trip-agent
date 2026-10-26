@@ -20,10 +20,24 @@ export const emptyConfig: UserAPIConfig = {
   amap_security_code: "",
 };
 const storageKey = "city-trip:user-api-config:v1";
+let runtimeConfig: UserAPIConfig = { ...emptyConfig };
 
 export function getBrowserConfig(): UserAPIConfig {
+  return { ...runtimeConfig };
+}
+
+export function setRuntimeConfig(config: UserAPIConfig) {
+  runtimeConfig = { ...config };
+}
+
+// Read the previous browser format once for migration; never save new keys here.
+export function getLegacyBrowserConfig(): UserAPIConfig | null {
   try {
-    const parsed = JSON.parse(sessionStorage.getItem(storageKey) || "{}");
+    const parsed = JSON.parse(
+      localStorage.getItem(storageKey) ??
+        sessionStorage.getItem(storageKey) ??
+        "{}",
+    );
     const config = { ...emptyConfig };
     for (const field of Object.keys(config) as (keyof UserAPIConfig)[]) {
       if (typeof parsed[field] === "string")
@@ -33,17 +47,19 @@ export function getBrowserConfig(): UserAPIConfig {
       config.tool_provider = "demo";
     if (!["demo", "llm"].includes(config.planning_mode))
       config.planning_mode = "demo";
-    return config;
+    return Object.entries(config).some(
+      ([key, value]) =>
+        !["tool_provider", "planning_mode"].includes(key) && value,
+    )
+      ? config
+      : null;
   } catch {
-    return { ...emptyConfig };
+    return null;
   }
 }
 
-export function saveBrowserConfig(config: UserAPIConfig) {
-  sessionStorage.setItem(storageKey, JSON.stringify(config));
-}
-
-export function clearBrowserConfig() {
+export function clearLegacyBrowserConfig() {
+  localStorage.removeItem(storageKey);
   sessionStorage.removeItem(storageKey);
 }
 

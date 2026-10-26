@@ -1,0 +1,10 @@
+{
+  "tool_provider": "demo",
+  "planning_mode": "demo",
+  "amap_api_key": "",
+  "llm_base_url": "https://api.deepseek.com",
+  "llm_api_key": "",
+  "llm_model": "deepseek-flash",
+  "amap_js_key": "",
+  "amap_security_code": ""
+}

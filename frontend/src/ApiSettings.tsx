@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Eye,
   EyeOff,
@@ -10,6 +10,32 @@ import {
 import { api } from "./api";
 import { emptyConfig } from "./userConfig";
 import type { UserAPIConfig } from "./userConfig";
+
+type ConnectionFeedback = { error: boolean; message: string };
+
+function ConnectionResult({
+  id,
+  result,
+}: {
+  id: string;
+  result?: ConnectionFeedback;
+}) {
+  const element = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (result?.message) element.current?.scrollIntoView({ block: "nearest" });
+  }, [result]);
+  return (
+    <div
+      ref={element}
+      id={id}
+      className={`connection-result${result?.error ? " error" : ""}`}
+      role={result?.error ? "alert" : "status"}
+      aria-live="polite"
+    >
+      {result?.message}
+    </div>
+  );
+}
 
 function SecretField({
   id,
@@ -53,46 +79,99 @@ function SecretField({
 
 export default function ApiSettings({
   config,
+  configPath,
   onSave,
   onClose,
 }: {
   config: UserAPIConfig;
+  configPath: string;
   onSave: (config: UserAPIConfig, clear?: boolean) => Promise<void>;
   onClose: () => void;
 }) {
   const [draft, setDraft] = useState({ ...config });
-  const [busy, setBusy] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState<"model" | "amap" | null>(null);
+  const busy = saving || testing !== null;
   const [error, setError] = useState("");
-  const [status, setStatus] = useState("");
+  const [testResults, setTestResults] = useState<
+    Partial<Record<"model" | "amap", ConnectionFeedback>>
+  >({});
   const update = (key: keyof UserAPIConfig, value: string) => {
     setDraft((d) => ({ ...d, [key]: value }));
-    setStatus("");
+    setTestResults({});
+    setError("");
   };
   async function test(service: "model" | "amap") {
-    setBusy(true);
+    const validation =
+      service === "model"
+        ? draft.planning_mode !== "llm"
+          ? "请先将规划模式切换为「使用我的模型 API」。"
+          : !draft.llm_api_key.trim() ||
+              !draft.llm_base_url.trim() ||
+              !draft.llm_model.trim()
+            ? "请填写模型服务地址、模型名称和模型 API Key 后再测试。"
+            : ""
+        : draft.tool_provider !== "amap"
+          ? "请先将地点与交通数据切换为「使用我的高德 Web 服务」。"
+          : !draft.amap_api_key.trim()
+            ? "请填写高德 Web 服务 Key 后再测试。"
+            : "";
     setError("");
-    setStatus("");
+    if (validation) {
+      setTestResults((current) => ({
+        ...current,
+        [service]: { error: true, message: validation },
+      }));
+      return;
+    }
+    setTesting(service);
+    setTestResults((current) => ({
+      ...current,
+      [service]: { error: false, message: "正在连接服务，最多等待 20 秒…" },
+    }));
     try {
       const result = await api<{ message: string }>(
         "/settings/test",
         { service },
-        draft,
+        {
+          ...draft,
+          llm_base_url: draft.llm_base_url.trim(),
+          ...(service === "model"
+            ? { tool_provider: "demo" }
+            : { planning_mode: "demo" }),
+        },
+        { signal: AbortSignal.timeout(20_000) },
       );
-      setStatus(result.message);
+      setTestResults((current) => ({
+        ...current,
+        [service]: { error: false, message: result.message },
+      }));
     } catch (e) {
-      setError(e instanceof Error ? e.message : "连接失败");
+      const message =
+        e instanceof Error &&
+        (e.name === "TimeoutError" || e.name === "AbortError")
+          ? "连接测试超时（20 秒），请检查网络或服务地址后重试。"
+          : e instanceof TypeError
+            ? "无法连接应用后端，请检查本地服务是否仍在运行。"
+            : e instanceof Error
+              ? e.message
+              : "连接失败，请重试。";
+      setTestResults((current) => ({
+        ...current,
+        [service]: { error: true, message },
+      }));
     } finally {
-      setBusy(false);
+      setTesting(null);
     }
   }
   async function save(clear = false) {
-    setBusy(true);
+    setSaving(true);
     setError("");
     try {
       await onSave(clear ? { ...emptyConfig } : draft, clear);
     } catch (e) {
       setError(e instanceof Error ? e.message : "保存失败");
-      setBusy(false);
+      setSaving(false);
     }
   }
   return (
@@ -118,8 +197,8 @@ export default function ApiSettings({
         </div>
         <p className="settings-intro">
           <ShieldCheck size={17} />
-          使用你自己的服务与额度。Key
-          只保存在当前标签页，请求时交给服务端转发，不写入行程或数据库。
+          配置保存在项目本地文件，下次启动自动读取；不再保存到浏览器缓存。配置文件已被
+          Git 忽略，不写入行程数据库。
         </p>
         <form
           onSubmit={(e) => {
@@ -127,7 +206,7 @@ export default function ApiSettings({
             void save();
           }}
         >
-          <fieldset className="settings-section">
+          <fieldset className="settings-section" disabled={busy}>
             <legend>模型服务</legend>
             <div className="field">
               <label htmlFor="planning-mode">规划模式</label>
@@ -178,19 +257,21 @@ export default function ApiSettings({
             <button
               type="button"
               className="outline-button"
-              disabled={
-                busy ||
-                draft.planning_mode !== "llm" ||
-                !draft.llm_api_key ||
-                !draft.llm_base_url ||
-                !draft.llm_model
-              }
+              disabled={busy}
+              aria-describedby="model-test-result"
               onClick={() => void test("model")}
             >
-              {busy && <LoaderCircle size={13} className="spin" />}测试模型连接
+              {testing === "model" && (
+                <LoaderCircle size={13} className="spin" />
+              )}
+              {testing === "model" ? "正在测试模型…" : "测试模型连接"}
             </button>
+            <ConnectionResult
+              id="model-test-result"
+              result={testResults.model}
+            />
           </fieldset>
-          <fieldset className="settings-section">
+          <fieldset className="settings-section" disabled={busy}>
             <legend>高德地图</legend>
             <div className="field">
               <label htmlFor="map-provider">地点与交通数据</label>
@@ -211,23 +292,42 @@ export default function ApiSettings({
               onChange={(v) => update("amap_api_key", v)}
             />
             <p className="settings-help">
-              用于中国大陆的地点、路线和天气查询。境外目的地可先使用演示模式。
+              在高德控制台选择「Web服务」，申请一个
+              Key，用于地点搜索、地理编码、路线、天气、坐标转换和行政区域查询。无需分别申请六个
+              Key。境外目的地可先使用演示模式。{" "}
+              <a
+                href="https://lbs.amap.com/api/webservice/gettingstarted"
+                target="_blank"
+                rel="noreferrer"
+              >
+                查看申请说明
+              </a>
             </p>
             <button
               type="button"
               className="outline-button"
-              disabled={
-                busy || draft.tool_provider !== "amap" || !draft.amap_api_key
-              }
+              disabled={busy}
+              aria-describedby="amap-test-result"
               onClick={() => void test("amap")}
             >
-              测试高德连接
+              {testing === "amap" && (
+                <LoaderCircle size={13} className="spin" />
+              )}
+              {testing === "amap" ? "正在测试高德…" : "测试高德连接"}
             </button>
+            <ConnectionResult id="amap-test-result" result={testResults.amap} />
             <details className="map-key-details">
               <summary>显示真实地图（可选）</summary>
               <p>
-                浏览器地图需要单独的 JS API Key
-                和安全密钥；未配置时保留路线示意。
+                如需交互地图，再添加一个「Web端(JS
+                API)」Key，并填写配套安全密钥（securityJsCode）。未配置时保留路线示意。{" "}
+                <a
+                  href="https://lbs.amap.com/api/javascript-api-v2/prerequisites"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  查看申请说明
+                </a>
               </p>
               <SecretField
                 id="amap-js-key"
@@ -248,11 +348,10 @@ export default function ApiSettings({
               {error}
             </div>
           )}
-          {status && (
-            <div className="message success" role="status">
-              {status}
-            </div>
-          )}
+          <p className="settings-help">
+            配置文件：<code className="config-file-path">{configPath}</code>
+            可在本机查看和修改，Key 以明文保存在该文件中。
+          </p>
           <div className="settings-footer">
             <button
               type="button"
@@ -260,10 +359,11 @@ export default function ApiSettings({
               disabled={busy}
               onClick={() => void save(true)}
             >
-              清除本标签页配置
+              清除已保存配置
             </button>
             <button className="primary" disabled={busy} type="submit">
-              {busy && <LoaderCircle size={14} className="spin" />}保存 API 设置
+              {saving && <LoaderCircle size={14} className="spin" />}保存 API
+              设置
             </button>
           </div>
           <p className="settings-help">

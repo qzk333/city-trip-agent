@@ -4,12 +4,15 @@ from time import monotonic
 
 import httpx
 
+from app.amap_gateway import AmapRequestError, amap_get
 from app.config import Settings
-from app.schemas import Location, Place, RouteLeg, ToolResult
+from app.schemas import GuideResearch, Location, Place, RouteLeg, ToolResult
 
 
 class ToolUnavailable(Exception):
-    pass
+    def __init__(self, message: str, *, fatal: bool = False):
+        super().__init__(message)
+        self.fatal = fatal
 
 
 def distance_meters(a: Location | Place, b: Location | Place) -> int:
@@ -40,6 +43,7 @@ class TravelTools:
         self.converted_coordinates: dict[tuple, tuple[float, float]] = {}
         self.trace: list[dict] = []
         self.deadline = monotonic() + settings.max_run_seconds
+        self.guides = GuideResearch()
 
     def remaining_seconds(self) -> float:
         remaining = self.deadline - monotonic()
@@ -53,22 +57,24 @@ class TravelTools:
         if self.country_code != "CN":
             raise ToolUnavailable("当前接入的是高德中国大陆标准服务，境外目的地请使用演示模式")
         try:
-            response = httpx.get(
-                f"https://restapi.amap.com{path}",
-                params={**params, "key": self.settings.amap_api_key},
-                timeout=min(self.settings.tool_timeout_seconds, self.remaining_seconds()),
-            )
-            response.raise_for_status()
-            data = response.json()
-            if data.get("status") != "1":
-                raise ToolUnavailable("地图服务拒绝请求，请检查接口权限、配额和配置")
+            data, cached, retries = amap_get(self.settings, path, params, self.deadline, request=httpx.get)
+            if cached or retries:
+                self.trace.append(
+                    {
+                        "tool": "amap_request",
+                        "status": "cache_hit" if cached else "retried",
+                        "retries": retries,
+                    }
+                )
             return data
-        except (httpx.HTTPError, ValueError) as exc:
-            raise ToolUnavailable("地图服务暂时不可用，请稍后重试") from exc
+        except AmapRequestError as exc:
+            raise ToolUnavailable(str(exc), fatal=exc.fatal) from exc
 
     def route(
         self, origin_id: str, a: Location | Place, destination_id: str, b: Location | Place, mode: str
     ) -> RouteLeg:
+        if mode == "auto":
+            return self._auto_route(origin_id, a, destination_id, b)
         key = (origin_id, destination_id, mode)
         self.remaining_seconds()
         if key in self.cache:
@@ -95,23 +101,25 @@ class TravelTools:
                 walking_meters=walking,
                 provider="demo",
                 evidence="自建演示估算：按直线距离和固定速度计算，不是真实导航路线。",
+                mode=mode,
             )
         else:
             if a.coordinate_system == "WGS84" or b.coordinate_system == "WGS84":
                 a, b = self._to_amap(a), self._to_amap(b)
-            params = {"origin": f"{a.longitude},{a.latitude}", "destination": f"{b.longitude},{b.latitude}"}
-            if mode == "walking":
-                data = self._get("/v3/direction/walking", params)
+            params = {
+                "origin": f"{a.longitude:.6f},{a.latitude:.6f}",
+                "destination": f"{b.longitude:.6f},{b.latitude:.6f}",
+            }
+            if mode in ("walking", "driving"):
+                data = self._get(f"/v3/direction/{mode}", params)
                 paths = data.get("route", {}).get("paths", [])
                 if not paths:
-                    raise ToolUnavailable("未查到步行路线，不能将缺失路线视为可达")
+                    raise ToolUnavailable("未查到该路段的导航路线")
                 path = paths[0]
                 distance = int(path["distance"])
-                walking = distance
+                walking = distance if mode == "walking" else 0
             else:
-                data = self._get(
-                    "/v3/direction/transit/integrated", {**params, "city": self.adcode or self.city}
-                )
+                data = self._get("/v3/direction/transit/integrated", {**params, "city": self.city})
                 paths = data.get("route", {}).get("transits", [])
                 if not paths:
                     raise ToolUnavailable("未查到公共交通路线，请更换交通方式或候选地点")
@@ -126,6 +134,8 @@ class TravelTools:
                 walking_meters=walking,
                 provider="amap",
                 evidence="高德查询时的路线估计，未模拟未来日期路况；不包含完整景区内部步行。",
+                mode=mode,
+                route_status="queried",
             )
         self.cache[key] = leg
         self.trace.append(
@@ -137,6 +147,78 @@ class TravelTools:
                 "destination": destination_id,
             }
         )
+        return leg
+
+    def _auto_route(self, origin_id, a, destination_id, b) -> RouteLeg:
+        key = (origin_id, destination_id, "auto")
+        self.remaining_seconds()
+        if key in self.cache:
+            return self.cache[key]
+        if self.settings.tool_provider == "amap" and not self.settings.amap_api_key:
+            raise ToolUnavailable("高德 Key 尚未配置，请在网页 API 设置中填写自己的 Key")
+        distance = distance_meters(a, b)
+        hint = next(
+            (
+                item
+                for item in self.guides.advice
+                if destination_id in item.place_ids and (origin_id == "hotel" or origin_id in item.place_ids)
+            ),
+            None,
+        )
+        preferred = hint.mode if hint else "walking" if distance <= 1200 else "driving"
+        if preferred == "walking" and distance > 4000:
+            preferred = "driving"
+        alternatives = [preferred]
+        if preferred == "transit":
+            alternatives.append("walking" if distance < 1000 else "driving")
+        elif preferred == "walking" and distance > 1000:
+            alternatives.append("driving")
+        leg = None
+        for mode in alternatives:
+            try:
+                leg = self.route(origin_id, a, destination_id, b, mode)
+                break
+            except ToolUnavailable as exc:
+                if exc.fatal or self.route_calls >= self.settings.max_route_calls:
+                    raise
+                self.remaining_seconds()
+        if leg is None:
+            road_distance = round(distance * 1.35)
+            duration = max(
+                5,
+                math.ceil(road_distance / (65 if preferred == "walking" else 250))
+                + (0 if preferred == "walking" else 8),
+            )
+            leg = RouteLeg(
+                origin_id=origin_id,
+                destination_id=destination_id,
+                duration_minutes=duration,
+                distance_meters=road_distance,
+                walking_meters=road_distance if preferred == "walking" else 0,
+                provider="estimate",
+                mode=preferred,
+                evidence="导航查询未取得可用结果；按地点距离保守估时，未确认实际道路、班次与打车可用性。",
+            )
+            self.trace.append({"tool": "get_routes", "status": "estimated", "provider": "estimate"})
+        label = {"walking": "步行", "driving": "打车 / 自驾", "transit": "公交 / 地铁"}[leg.mode]
+        recommendation = (
+            hint.advice
+            if hint and hint.mode == leg.mode
+            else (
+                "相邻地点距离较近，建议步行，按体力和现场通行情况调整。"
+                if leg.mode == "walking"
+                else "本段距离较远，建议打车或自驾；实际叫车、费用和通行以出发时为准。"
+                if leg.mode == "driving"
+                else "可考虑公交或地铁，出发前核对站点、班次及末班时间。"
+            )
+        )
+        leg = leg.model_copy(
+            update={
+                "recommendation": f"{label}：{recommendation}",
+                "source_ids": hint.source_ids if hint and hint.mode == leg.mode else [],
+            }
+        )
+        self.cache[key] = leg
         return leg
 
     def weather(self, start: date, days: int) -> ToolResult:
@@ -202,6 +284,80 @@ class TravelTools:
             raise ToolUnavailable("地图坐标转换未完成，不能混用不同坐标系") from exc
         self.converted_coordinates[key] = (lon, lat)
         return location.model_copy(update={"longitude": lon, "latitude": lat, "coordinate_system": "GCJ-02"})
+
+    def search_candidates(
+        self, query: str, category: str, anchor: Location | Place | None = None
+    ) -> dict[str, Place]:
+        """A bounded, city-restricted search through the shared per-key gateway."""
+        if self.settings.tool_provider != "amap":
+            raise ToolUnavailable("演示模式不联网补查新景点，请启用高德或使用已有目录地点。")
+        params = {
+            "keywords": query,
+            "city": self.city,
+            "citylimit": "true",
+            "offset": 5,
+            "extensions": "base",
+        }
+        path = "/v3/place/text"
+        if anchor:
+            anchor = self._to_amap(anchor) if anchor.coordinate_system == "WGS84" else anchor
+            path = "/v3/place/around"
+            params.update(
+                location=f"{anchor.longitude:.6f},{anchor.latitude:.6f}", radius=5000, sortrule="distance"
+            )
+        rows = self._get(path, params).get("pois", [])
+        result = {}
+        observed = datetime.now(UTC).isoformat()
+        for row in rows[:5]:
+            try:
+                typecode = row.get("typecode")
+                allowed_types = (
+                    {"05"}
+                    if category == "coffee"
+                    else {"06", "11", "14", "19"}
+                    if category == "city"
+                    else {"11", "14"}
+                )
+                if isinstance(typecode, str) and len(typecode) >= 2 and typecode[:2] not in allowed_types:
+                    continue  # Stations, ticket counters and address labels are not attraction substitutes.
+                longitude, latitude = map(float, row["location"].split(","))
+                location = Location(name=row["name"][:100], longitude=longitude, latitude=latitude)
+                returned_city = row.get("cityname")
+                if (
+                    isinstance(returned_city, str)
+                    and returned_city
+                    and returned_city.rstrip("市") != self.city.rstrip("市")
+                ):
+                    continue
+                pid = "amap-" + str(row["id"])
+                if not row["id"] or len(pid) > 100:
+                    continue
+                result[pid] = Place(
+                    id=pid,
+                    **location.model_dump(),
+                    category=category,
+                    indoor=category in {"culture", "coffee"},
+                    duration_minutes={"nature": 75, "culture": 90, "coffee": 45, "city": 60}[category],
+                    opening=None,
+                    closing=None,
+                    subtitle=row.get("address") or self.city,
+                    source_url=f"https://uri.amap.com/marker?position={longitude},{latitude}",
+                    description="本次调整按需补查的高德地点；停留时长和室内外属性为估算。",
+                    evidence_note=f"高德 POI 增量查询，查询时间 {observed}；"
+                    "营业、预约与建议停留时间尚未核验。",
+                    fixture=False,
+                )
+            except (ValueError, KeyError, TypeError):
+                continue
+        self.trace.append(
+            {
+                "tool": "search_candidates",
+                "status": "ok" if result else "no_result",
+                "query": query,
+                "count": len(result),
+            }
+        )
+        return result
 
     def discover(self, destination: dict) -> dict:
         if self.settings.tool_provider != "amap":

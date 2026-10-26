@@ -1,7 +1,9 @@
 from datetime import time, timedelta
+from math import ceil
 
 from app.catalog import CATALOG
-from app.schemas import Activity, Check, DayPlan, Itinerary, Place, Requirements
+from app.lodging import boundary_window, day_boundaries
+from app.schemas import Activity, Check, DayPlan, HotelResearch, Itinerary, Place, Requirements, ToolResult
 from app.tools import ToolUnavailable, TravelTools, distance_meters
 
 TRANSFER_BUFFER = 10
@@ -24,6 +26,7 @@ def build_plan(
     catalog: dict[str, Place] | None = None,
 ) -> Itinerary:
     catalog = catalog if catalog is not None else CATALOG
+    lodging = HotelResearch.model_validate(overrides.get("lodging", {}))
     checks = [
         Check(
             code="fixture_data",
@@ -42,7 +45,11 @@ def build_plan(
             severity="warning",
             message="地点来自本次地图查询；营业时间、预约与建议停留时间尚未核实。",
         )
-    weather = tools.weather(req.start_date, req.days)
+    weather = (
+        ToolResult.model_validate(overrides["weather_snapshot"])
+        if "weather_snapshot" in overrides
+        else tools.weather(req.start_date, req.days)
+    )
     if weather.status != "ok":
         checks.append(
             Check(code="weather_missing", severity="warning", message=weather.error or weather.evidence)
@@ -66,7 +73,9 @@ def build_plan(
     excluded = set(overrides.get("excluded", []))
     visited: set[str] = {a["place_id"] for d in overrides.get("frozen_days", []) for a in d["activities"]}
     preferred = overrides.get("preferred", order)
-    candidate_ids = list(dict.fromkeys([*req.must_visit, *preferred, *order]))
+    candidate_ids = list(dict.fromkeys([*req.must_visit, *req.place_days, *preferred, *order]))
+    if req.days > 1 and "allowed_place_ids" not in overrides:
+        candidate_ids = list(dict.fromkeys([*candidate_ids, *catalog]))
     plans: list[DayPlan] = []
     direct_conflict = False
     for day_number in range(1, req.days + 1):
@@ -76,10 +85,9 @@ def build_plan(
             plans.append(plan)
             visited.update(a.place_id for a in plan.activities)
             continue
-        day_start = minutes(req.day_start) + overrides.get("delays", {}).get(str(day_number), 0)
-        day_end = minutes(req.day_end)
+        day_start, day_end = boundary_window(req, day_number, overrides.get("delays", {}))
         cursor = day_start
-        origin_id, origin = "hotel", req.hotel
+        (origin_id, origin), (end_id, end_place) = day_boundaries(req, lodging, day_number)
         activities: list[Activity] = []
         legs = []
         appointments = sorted((a for a in fixed if a.day == day_number), key=lambda a: a.start)
@@ -94,50 +102,96 @@ def build_plan(
             checks.append(
                 Check(code="fixed_outside_day", severity="error", message="固定活动超出当天可用时间")
             )
-        cap = max(3 if req.pace == "relaxed" else 4, len(appointments))
+        available = [
+            p
+            for p in candidate_ids
+            if p not in visited and p not in excluded and p not in fixed_places and p in catalog
+        ]
+        days_left = sum(
+            not any(d["day"] == n for d in overrides.get("frozen_days", []))
+            for n in range(day_number, req.days + 1)
+        )
+        target = max(1, ceil(len(available) / max(1, days_left)))
+        cap = max(min(3 if req.pace == "relaxed" else 4, target), len(appointments))
+        if day_start >= day_end and not appointments:
+            cap = 0
+        exact_ids = overrides.get("per_day_ids", {}).get(str(day_number))
+        if exact_ids is not None:
+            cap = len(exact_ids)
+        groups = overrides.get("day_groups", [])
+        group = groups[day_number - 1] if day_number <= len(groups) else []
         lunch_taken = False
         try:
             # Each fixed appointment forms a boundary; the final boundary is the hotel.
             for anchor in [*appointments, None]:
                 limit = minutes(anchor.start) if anchor else day_end
-                anchor_id = anchor.place_id if anchor else "hotel"
-                anchor_place = catalog[anchor_id] if anchor else req.hotel
+                anchor_id = anchor.place_id if anchor else end_id
+                anchor_place = catalog[anchor_id] if anchor else end_place
                 while len(activities) < cap:
                     candidates = [
                         p
                         for p in candidate_ids
-                        if p not in visited and p not in fixed_places and p not in excluded and p in catalog
+                        if p not in visited
+                        and p not in fixed_places
+                        and p not in excluded
+                        and p in catalog
+                        and (p not in req.place_days or req.place_days[p] == day_number)
                     ]
                     if overrides.get("indoor"):
                         candidates = [p for p in candidates if catalog[p].indoor or p in req.must_visit]
                     if "allowed_place_ids" in overrides:
                         candidates = [p for p in candidates if p in overrides["allowed_place_ids"]]
+                    if exact_ids is not None:
+                        candidates = [p for p in candidates if p in exact_ids]
+                        if anchor and anchor.place_id in exact_ids:
+                            candidates = [
+                                p for p in candidates if exact_ids.index(p) < exact_ids.index(anchor.place_id)
+                            ]
                     candidates.sort(
                         key=lambda p: (
+                            exact_ids.index(p) if exact_ids is not None else 0,
                             p not in req.must_visit,
-                            candidate_ids.index(p)
-                            if overrides.get("preferred") or tools.settings.planning_mode == "llm"
-                            else 0,
+                            p not in group if group else False,
+                            candidate_ids.index(p) if overrides.get("preferred") else 0,
                             catalog[p].category not in req.interests,
-                            distance_meters(origin, catalog[p]),
+                            distance_meters(origin, catalog[p]) if origin else 0,
+                            candidate_ids.index(p),
                         )
                     )
                     selected = None
                     for place_id in candidates:
                         place = catalog[place_id]
-                        leg = tools.route(origin_id, origin, place_id, place, req.transport)
+                        try:
+                            leg = (
+                                tools.route(origin_id, origin, place_id, place, req.transport)
+                                if origin
+                                else None
+                            )
+                        except ToolUnavailable as exc:
+                            if exc.fatal or tools.route_calls >= tools.settings.max_route_calls:
+                                raise
+                            continue
                         begin = max(
-                            cursor + leg.duration_minutes + TRANSFER_BUFFER,
+                            cursor + leg.duration_minutes + TRANSFER_BUFFER if leg else cursor,
                             minutes(place.opening) if place.opening else day_start,
                         )
                         add_lunch = not lunch_taken and begin >= 12 * 60
                         if add_lunch:
                             begin += 45
                         finish = begin + place.duration_minutes
-                        onward = tools.route(place_id, place, anchor_id, anchor_place, req.transport)
+                        try:
+                            onward = (
+                                tools.route(place_id, place, anchor_id, anchor_place, req.transport)
+                                if anchor_place
+                                else None
+                            )
+                        except ToolUnavailable as exc:
+                            if exc.fatal or tools.route_calls >= tools.settings.max_route_calls:
+                                raise
+                            continue
                         if (
                             finish <= min(day_end, minutes(place.closing) if place.closing else day_end)
-                            and finish + onward.duration_minutes + TRANSFER_BUFFER <= limit
+                            and finish + (onward.duration_minutes + TRANSFER_BUFFER if onward else 0) <= limit
                         ):
                             selected = place, leg, begin, finish, add_lunch
                             break
@@ -156,17 +210,27 @@ def build_plan(
                             ),
                         )
                     )
-                    legs.append(leg)
+                    if leg:
+                        legs.append(leg)
                     visited.add(place.id)
                     origin_id, origin, cursor = place.id, place, finish + (15 if req.pace == "relaxed" else 5)
                     lunch_taken |= add_lunch
-                leg = tools.route(origin_id, origin, anchor_id, anchor_place, req.transport)
+                leg = (
+                    tools.route(origin_id, origin, anchor_id, anchor_place, req.transport)
+                    if origin and anchor_place
+                    else None
+                )
                 if anchor:
-                    legs.append(leg)
+                    if leg:
+                        legs.append(leg)
                     activities.append(anchor)
                     visited.add(anchor.place_id)
                     origin_id, origin, cursor = anchor.place_id, catalog[anchor.place_id], minutes(anchor.end)
-                elif activities:
+                elif leg and (
+                    activities
+                    or (day_number == 1 and req.arrival)
+                    or (day_number == req.days and req.departure)
+                ):
                     legs.append(leg)
         except ToolUnavailable as exc:
             checks.append(Check(code="route_unavailable", severity="error", message=str(exc)))
@@ -179,14 +243,27 @@ def build_plan(
                 legs=legs,
             )
         )
+    if req.use_web_guides and tools.guides.status in {"unavailable", "partial"}:
+        checks.append(Check(code="guide_research_partial", severity="warning", message=tools.guides.note))
+    if any(leg.provider == "estimate" for plan in plans for leg in plan.legs):
+        checks.append(
+            Check(
+                code="route_estimated",
+                severity="warning",
+                message="部分路段未取得导航结果，使用距离估时并给出交通建议；出发前需确认实际路线与可用交通。",
+            )
+        )
+    unique_checks = list({(check.code, check.message): check for check in checks}.values())
     return Itinerary(
         status="CONFLICT" if direct_conflict else "NEEDS_CONFIRMATION",
         days=plans,
-        checks=checks,
+        checks=unique_checks,
         weather=weather,
         planning_mode=tools.settings.planning_mode,
         tool_provider=tools.settings.tool_provider,
         trace=tools.trace,
         day_start_offsets=overrides.get("delays", {}),
-        summary="已保留固定活动，并为交通和休息留出余量。所有演示信息仍需出行前核验。",
+        guides=tools.guides,
+        lodging=lodging,
+        summary=f"已按 {req.days} 天分配地点，为交通和休息留出余量；路线与攻略中的待确认信息请出行前核实。",
     )

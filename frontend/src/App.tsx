@@ -3,6 +3,8 @@ import type { FormEvent } from "react";
 import {
   ArrowDown,
   ArrowRight,
+  BookOpen,
+  CarFront,
   Check,
   CheckCircle2,
   ChevronRight,
@@ -24,16 +26,22 @@ import {
   Sparkles,
   TrainFront,
   Trash2,
-  Umbrella,
   UnlockKeyhole,
   X,
 } from "lucide-react";
-import { api, waitForRun } from "./api";
+import {
+  api,
+  clearProjectConfig,
+  loadProjectConfig,
+  saveProjectConfig,
+  waitForRun,
+} from "./api";
 import type {
   Action,
   Activity,
   Destination,
   Health,
+  HotelChoice,
   Itinerary,
   Place,
   Proposal,
@@ -45,12 +53,10 @@ import type {
 } from "./api";
 import RouteMap from "./RouteMap";
 import ApiSettings from "./ApiSettings";
+import HotelPanel from "./HotelPanel";
+import BoundaryEditor from "./BoundaryEditor";
 import DestinationSelect from "./DestinationSelect";
-import {
-  clearBrowserConfig,
-  getBrowserConfig,
-  saveBrowserConfig,
-} from "./userConfig";
+import { getBrowserConfig } from "./userConfig";
 import type { UserAPIConfig } from "./userConfig";
 
 const storedTripKey = "city-trip:last-trip";
@@ -72,13 +78,18 @@ const initial: Requirements = {
   days: 1,
   day_start: "09:00",
   day_end: "18:00",
+  lodging_mode: "route_first",
+  arrival: null,
+  departure: null,
+  day_windows: {},
   hotel: {
     name: "演示起点 · 湖滨",
     longitude: 120.163,
     latitude: 30.251,
     coordinate_system: "GCJ-02",
   },
-  transport: "transit",
+  transport: "auto",
+  use_web_guides: true,
   pace: "relaxed",
   interests: ["nature", "culture"],
   must_visit: ["westlake", "gushan_museum"],
@@ -113,15 +124,18 @@ export default function App() {
   const [selectedPlace, setSelectedPlace] = useState<string | null>(null);
   const [versions, setVersions] = useState<Version[] | null>(null);
   const [appointmentOn, setAppointmentOn] = useState(false);
-  const [delay, setDelay] = useState(40);
+  const [revisionMessage, setRevisionMessage] = useState("");
+  const [revisionScope, setRevisionScope] = useState("auto");
+  const [reselectPlaces, setReselectPlaces] = useState(false);
   const [showForm, setShowForm] = useState(true);
   const [config, setConfig] = useState<UserAPIConfig>(getBrowserConfig);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [configPath, setConfigPath] = useState(".local/api-config.json");
   const [catalogLoading, setCatalogLoading] = useState(false);
   const destinationRequest = useRef(0);
   const plan = proposal?.itinerary || trip?.itinerary || null;
   const day = plan?.days.find((d) => d.day === selectedDay) || plan?.days[0];
-  const activeReq = trip?.requirements || form;
+  const activeReq = proposal?.requirements || trip?.requirements || form;
   const errors = plan?.checks.filter((c) => c.severity === "error") || [];
   const canApply =
     !!proposal &&
@@ -129,18 +143,60 @@ export default function App() {
     !["CONFLICT", "NO_SOLUTION_WITHIN_LIMIT"].includes(
       proposal.itinerary.status,
     );
+  const saveBlockers = errors.length
+    ? Array.from(new Set(errors.map((check) => check.message)))
+    : proposal && !canApply
+      ? [statusNames[proposal.itinerary.status] || "本次调整尚未通过行程检查。"]
+      : [];
   const totalActivities =
     plan?.days.reduce((n, d) => n + d.activities.length, 0) || 0;
   const transitMinutes =
     day?.legs.reduce((n, leg) => n + leg.duration_minutes, 0) || 0;
+  const minute = (value: string) =>
+    Number(value.slice(0, 2)) * 60 + Number(value.slice(3, 5));
   const startMinutes =
-    Number(activeReq.day_start.slice(0, 2)) * 60 +
-    Number(activeReq.day_start.slice(3, 5)) +
-    (plan?.day_start_offsets?.[String(day?.day || 1)] || 0);
+    day &&
+    !day.activities.length &&
+    day.day === activeReq.days &&
+    activeReq.departure
+      ? Math.max(
+          0,
+          minute(activeReq.departure.time) -
+            activeReq.departure.buffer_minutes -
+            (day.legs.at(-1)?.duration_minutes || 0) -
+            10,
+        )
+      : Math.max(
+          minute(
+            activeReq.day_windows?.[String(day?.day || 1)]?.start ||
+              activeReq.day_start,
+          ) + (plan?.day_start_offsets?.[String(day?.day || 1)] || 0),
+          (day?.day || 1) === 1 && activeReq.arrival
+            ? minute(activeReq.arrival.time) + activeReq.arrival.buffer_minutes
+            : 0,
+        );
   const displayedStart = `${String(Math.floor(startMinutes / 60)).padStart(2, "0")}:${String(startMinutes % 60).padStart(2, "0")}`;
   const activeToolProvider = plan?.tool_provider || health?.tool_provider;
-  const planPlaces = trip?.places || places;
+  const planPlaces = proposal?.places || trip?.places || places;
   const placeById = (id: string) => planPlaces.find((p) => p.id === id);
+  const routeFirst = activeReq.lodging_mode === "route_first";
+  const chosenHotel = (night: number) => {
+    const stay = plan?.lodging?.nights.find((stay) => stay.night === night);
+    return stay?.candidates.find((hotel) => hotel.id === stay.selected_id)
+      ?.location;
+  };
+  const startHotel =
+    day?.day === 1 && activeReq.arrival
+      ? activeReq.arrival.location
+      : routeFirst
+        ? chosenHotel((day?.day || 1) - 1)
+        : activeReq.hotel;
+  const endHotel =
+    day?.day === activeReq.days && activeReq.departure
+      ? activeReq.departure.location
+      : routeFirst
+        ? chosenHotel(day?.day || 1)
+        : activeReq.hotel;
   const catalogReady =
     config.tool_provider === "demo" ||
     (!!form.catalog_id && places.length > 0 && places.every((p) => !p.fixture));
@@ -151,10 +207,11 @@ export default function App() {
     const requirements = {
       ...initial,
       ...saved.requirements,
+      lodging_mode: saved.requirements.lodging_mode || "fixed",
       city_id: saved.requirements.city_id ?? 19598,
     };
     setTrip({ ...saved, requirements });
-    setForm(requirements);
+    setForm({ ...requirements, transport: "auto" });
     setPlaces(saved.places);
     setAppointmentOn(saved.requirements.appointments.length > 0);
     return saved;
@@ -174,6 +231,10 @@ export default function App() {
       catalog_id: null,
       must_visit: [],
       appointments: [],
+      arrival: null,
+      departure: null,
+      day_windows: {},
+      place_days: {},
     }));
   }
 
@@ -199,6 +260,10 @@ export default function App() {
         province: destination.state || "",
         timezone: destination.timezone || "",
         catalog_id: null,
+        arrival: null,
+        departure: null,
+        day_windows: {},
+        place_days: {},
         must_visit: [],
         appointments: [],
         hotel: {
@@ -245,19 +310,21 @@ export default function App() {
   }
 
   async function saveSettings(next: UserAPIConfig, clear = false) {
-    const info = await api<Health>("/health", undefined, next);
     const refreshMap =
       next.amap_js_key !== config.amap_js_key ||
       next.amap_security_code !== config.amap_security_code;
-    if (clear) clearBrowserConfig();
-    else saveBrowserConfig(next);
-    setConfig(next);
+    const saved = clear
+      ? await clearProjectConfig()
+      : await saveProjectConfig(next);
+    const info = await api<Health>("/health");
+    setConfig(saved.config);
+    setConfigPath(saved.path);
     setHealth(info);
     setSettingsOpen(false);
     setNotice(
       clear
-        ? "已清除本标签页的 API 配置，切回演示模式。"
-        : "API 设置已保存在当前标签页。真实地图模式请先查询城市地点。",
+        ? "已清除项目中的 API 配置文件，切回演示模式。"
+        : "API 设置已保存到项目本地文件，下次启动自动读取。真实地图模式请先查询城市地点。",
     );
     if (refreshMap) window.location.reload();
   }
@@ -266,6 +333,10 @@ export default function App() {
     let alive = true;
     async function init() {
       try {
+        const savedConfig = await loadProjectConfig();
+        if (!alive) return;
+        setConfig(savedConfig.config);
+        setConfigPath(savedConfig.path);
         const [info, catalog] = await Promise.all([
           api<Health>("/health"),
           api<Place[]>("/places"),
@@ -306,8 +377,10 @@ export default function App() {
           }
         }
       } catch (e) {
-        if (alive)
+        if (alive) {
+          setConfig(getBrowserConfig());
           setError(e instanceof Error ? e.message : "无法连接本地服务");
+        }
       } finally {
         if (alive) setLoading(false);
       }
@@ -328,6 +401,7 @@ export default function App() {
     try {
       const req = {
         ...form,
+        transport: "auto" as const,
         appointments:
           appointmentOn && fixedExampleAvailable
             ? [
@@ -340,6 +414,12 @@ export default function App() {
               ]
             : [],
       };
+      if (
+        (req.arrival && !req.arrival.location.name.trim()) ||
+        (req.departure && !req.departure.location.name.trim())
+      ) {
+        throw new Error("请先确认抵离地点的名称和实际位置，再生成行程。");
+      }
       const created = await api<Trip>("/trips", req);
       localStorage.setItem(storedTripKey, created.id);
       setTrip(created);
@@ -372,13 +452,61 @@ export default function App() {
           action,
           day: activity?.day || selectedDay,
           activity_id: activity?.id || null,
-          delay_minutes: delay,
+          delay_minutes: 40,
         },
       );
       const run = await waitForRun(run_id, setEvents);
       setProposal(run.proposal);
     } catch (e) {
       setError(e instanceof Error ? e.message : "调整失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function reviseFromText() {
+    if (!trip || proposal || !revisionMessage.trim()) return;
+    setBusy(true);
+    setError("");
+    setNotice("");
+    setEvents([]);
+    try {
+      const { run_id } = await api<{ run_id: string }>(
+        `/trips/${trip.id}/revisions`,
+        {
+          base_version: trip.current_version,
+          message: revisionMessage.trim(),
+          scope: revisionScope === "auto" ? null : revisionScope,
+          reselect: reselectPlaces,
+        },
+      );
+      const run = await waitForRun(run_id, setEvents);
+      setProposal(run.proposal);
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "调整失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function chooseHotel(choice: HotelChoice) {
+    if (!trip || proposal || !trip.current_version) return;
+    setBusy(true);
+    setError("");
+    setNotice("");
+    setEvents([]);
+    try {
+      const { run_id } = await api<{ run_id: string }>(
+        `/trips/${trip.id}/hotel-selections`,
+        {
+          base_version: trip.current_version,
+          ...choice,
+        },
+      );
+      const run = await waitForRun(run_id, setEvents);
+      setProposal(run.proposal);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "酒店选择失败");
     } finally {
       setBusy(false);
     }
@@ -611,7 +739,11 @@ export default function App() {
                 />
               </div>
               <div className="field">
-                <label htmlFor="day-end">返回住处</label>
+                <label htmlFor="day-end">
+                  {form.lodging_mode === "route_first"
+                    ? "当天结束"
+                    : "返回住处"}
+                </label>
                 <input
                   id="day-end"
                   type="time"
@@ -624,109 +756,147 @@ export default function App() {
               </div>
             </div>
             <div className="field">
-              <label htmlFor="hotel">住处 / 每日出发点</label>
-              <input
-                id="hotel"
-                required
-                maxLength={100}
-                value={form.hotel.name}
+              <BoundaryEditor
+                key={`arrival-${form.city_id}`}
+                kind="arrival"
+                city={form.city}
+                center={form.hotel}
+                value={form.arrival || null}
+                onChange={(arrival) => setForm({ ...form, arrival })}
+              />
+              <BoundaryEditor
+                key={`departure-${form.city_id}`}
+                kind="departure"
+                city={form.city}
+                center={form.hotel}
+                value={form.departure || null}
+                onChange={(departure) => setForm({ ...form, departure })}
+              />
+              <label htmlFor="lodging-mode">住宿安排</label>
+              <select
+                id="lodging-mode"
+                value={form.lodging_mode || "fixed"}
                 onChange={(e) =>
                   setForm({
                     ...form,
-                    hotel: { ...form.hotel, name: e.target.value },
+                    lodging_mode: e.target.value as "fixed" | "route_first",
                   })
                 }
-              />
-              <details className="coordinates">
-                <summary>
-                  调整位置坐标（{form.hotel.coordinate_system}）
-                </summary>
-                <label className="coordinate-system-label">
-                  坐标系
-                  <select
-                    aria-label="住处坐标系"
-                    value={form.hotel.coordinate_system}
-                    onChange={(e) =>
-                      setForm({
-                        ...form,
-                        hotel: {
-                          ...form.hotel,
-                          coordinate_system: e.target
-                            .value as Requirements["hotel"]["coordinate_system"],
-                        },
-                      })
-                    }
-                  >
-                    <option value="GCJ-02">高德 GCJ-02</option>
-                    <option value="WGS84">GPS / 地理目录 WGS84</option>
-                  </select>
-                </label>
-                <div className="field-grid">
-                  <label>
-                    经度
-                    <input
-                      aria-label="住处经度"
-                      type="number"
-                      min="-180"
-                      max="180"
-                      step="any"
-                      required
-                      value={form.hotel.longitude}
-                      onChange={(e) =>
-                        setForm({
-                          ...form,
-                          hotel: {
-                            ...form.hotel,
-                            longitude: Number(e.target.value),
-                          },
-                        })
-                      }
-                    />
-                  </label>
-                  <label>
-                    纬度
-                    <input
-                      aria-label="住处纬度"
-                      type="number"
-                      min="-90"
-                      max="90"
-                      step="any"
-                      required
-                      value={form.hotel.latitude}
-                      onChange={(e) =>
-                        setForm({
-                          ...form,
-                          hotel: {
-                            ...form.hotel,
-                            latitude: Number(e.target.value),
-                          },
-                        })
-                      }
-                    />
-                  </label>
-                </div>
-              </details>
+              >
+                <option value="route_first">先规划路线，再选择酒店</option>
+                <option value="fixed">已有固定住处，每天往返</option>
+              </select>
+              {form.lodging_mode === "route_first" && (
+                <p className="field-hint">
+                  先安排游玩地点，再根据每晚前后路线推荐住宿。建议同时填写首日抵达与末日返程信息。
+                </p>
+              )}
             </div>
-            <fieldset>
-              <legend>出行方式</legend>
-              <div className="segmented">
-                <button
-                  type="button"
-                  className={form.transport === "transit" ? "selected" : ""}
-                  onClick={() => setForm({ ...form, transport: "transit" })}
-                >
-                  <TrainFront size={15} />
-                  公共交通
-                </button>
-                <button
-                  type="button"
-                  className={form.transport === "walking" ? "selected" : ""}
-                  onClick={() => setForm({ ...form, transport: "walking" })}
-                >
-                  <Footprints size={15} />
-                  全程步行
-                </button>
+            {form.lodging_mode !== "route_first" && (
+              <div className="field">
+                <label htmlFor="hotel">住处 / 每日出发点</label>
+                <input
+                  id="hotel"
+                  required
+                  maxLength={100}
+                  value={form.hotel.name}
+                  onChange={(e) =>
+                    setForm({
+                      ...form,
+                      hotel: { ...form.hotel, name: e.target.value },
+                    })
+                  }
+                />
+                <details className="coordinates">
+                  <summary>
+                    调整位置坐标（{form.hotel.coordinate_system}）
+                  </summary>
+                  <label className="coordinate-system-label">
+                    坐标系
+                    <select
+                      aria-label="住处坐标系"
+                      value={form.hotel.coordinate_system}
+                      onChange={(e) =>
+                        setForm({
+                          ...form,
+                          hotel: {
+                            ...form.hotel,
+                            coordinate_system: e.target
+                              .value as Requirements["hotel"]["coordinate_system"],
+                          },
+                        })
+                      }
+                    >
+                      <option value="GCJ-02">高德 GCJ-02</option>
+                      <option value="WGS84">GPS / 地理目录 WGS84</option>
+                    </select>
+                  </label>
+                  <div className="field-grid">
+                    <label>
+                      经度
+                      <input
+                        aria-label="住处经度"
+                        type="number"
+                        min="-180"
+                        max="180"
+                        step="any"
+                        required
+                        value={form.hotel.longitude}
+                        onChange={(e) =>
+                          setForm({
+                            ...form,
+                            hotel: {
+                              ...form.hotel,
+                              longitude: Number(e.target.value),
+                            },
+                          })
+                        }
+                      />
+                    </label>
+                    <label>
+                      纬度
+                      <input
+                        aria-label="住处纬度"
+                        type="number"
+                        min="-90"
+                        max="90"
+                        step="any"
+                        required
+                        value={form.hotel.latitude}
+                        onChange={(e) =>
+                          setForm({
+                            ...form,
+                            hotel: {
+                              ...form.hotel,
+                              latitude: Number(e.target.value),
+                            },
+                          })
+                        }
+                      />
+                    </label>
+                  </div>
+                </details>
               </div>
+            )}
+            <fieldset className="travel-research-options">
+              <legend>攻略与交通建议</legend>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={form.use_web_guides}
+                  onChange={(e) =>
+                    setForm({
+                      ...form,
+                      use_web_guides: e.target.checked,
+                      transport: "auto",
+                    })
+                  }
+                />
+                参考网上攻略
+              </label>
+              <p>
+                结合攻略和地点距离，逐段建议步行、打车或公交。高德查询会排队并复用缓存，避免并发超限。
+              </p>
             </fieldset>
             <fieldset>
               <legend>旅行节奏</legend>
@@ -944,7 +1114,7 @@ export default function App() {
               </h2>
               <p>
                 {plan
-                  ? `${activeReq.start_date.replaceAll("-", ".")} 出发 · ${totalActivities} 个活动 · ${activeReq.transport === "transit" ? "公共交通" : "步行"}优先`
+                  ? `${activeReq.start_date.replaceAll("-", ".")} 出发 · ${totalActivities} 个活动 · ${routeFirst && activeReq.days > 1 ? (plan.lodging?.nights.every((n) => n.selected_id) && plan.lodging.nights.length === activeReq.days - 1 ? "住宿已选择" : "路线草案，住宿待选") : "分段交通建议"}`
                   : "从想去的地方开始，我们一起把路线理顺。"}
               </p>
             </div>
@@ -974,9 +1144,11 @@ export default function App() {
                 </span>
                 <h3>{proposal.label} · 尚未保存</h3>
                 <p>
-                  {trip?.current_version
-                    ? `新增 ${added.length} 项，移除 ${removed.length} 项，调整 ${changed.length} 项。`
-                    : "先看看路线和待确认事项，满意后再保存。"}
+                  {proposal.label.includes("住宿调整")
+                    ? "本次更新住宿与相邻两天交通，并复核活动安排。请检查时间与顺序变化后保存。"
+                    : trip?.current_version
+                      ? `新增 ${added.length} 项，移除 ${removed.length} 项，调整 ${changed.length} 项。`
+                      : "先看看路线和待确认事项，满意后再保存。"}
                 </p>
                 {trip?.current_version ? (
                   <div className="change-list">
@@ -993,6 +1165,37 @@ export default function App() {
                     ))}
                   </div>
                 ) : null}
+                {saveBlockers.length > 0 && (
+                  <div
+                    className="save-blockers"
+                    id="save-blockers"
+                    role="alert"
+                  >
+                    <strong>暂时无法保存</strong>
+                    <ul>
+                      {saveBlockers.map((message) => (
+                        <li key={message}>{message}</li>
+                      ))}
+                    </ul>
+                    <p>
+                      已保存的行程未改变。可取消本次调整，修改要求后重新生成。
+                    </p>
+                    <button
+                      type="button"
+                      className="text-button"
+                      onClick={() =>
+                        document
+                          .getElementById("itinerary-checks")
+                          ?.scrollIntoView({
+                            behavior: "smooth",
+                            block: "center",
+                          })
+                      }
+                    >
+                      查看完整行程检查 ↓
+                    </button>
+                  </div>
+                )}
               </div>
               <div className="proposal-actions">
                 {trip?.current_version ? (
@@ -1007,6 +1210,9 @@ export default function App() {
                 <button
                   className="primary"
                   disabled={busy || !canApply}
+                  aria-describedby={
+                    saveBlockers.length ? "save-blockers" : undefined
+                  }
                   onClick={() => void confirm()}
                 >
                   <Check size={16} />
@@ -1066,37 +1272,87 @@ export default function App() {
                     </span>
                   </div>
                   {!day.activities.length && (
-                    <div className="empty-small">
-                      当前条件下没有排入活动。请查看下方检查结果，或增加可用时间。
+                    <div
+                      className={
+                        (day.day === 1 && activeReq.arrival) ||
+                        (day.day === activeReq.days && activeReq.departure)
+                          ? "boundary-day"
+                          : "empty-small"
+                      }
+                    >
+                      {(day.day === 1 && activeReq.arrival) ||
+                      (day.day === activeReq.days && activeReq.departure)
+                        ? day.legs.length
+                          ? "当天仅安排抵离接驳与休息。"
+                          : "当天仅安排抵离接驳与休息；尚未选择住宿的路段将在选酒店后补齐。"
+                        : "当前条件下没有排入活动。请查看下方检查结果，或增加可用时间。"}
                     </div>
                   )}
                   <div className="timeline">
                     <div className="hotel-marker">
                       <span className="small-dot" />
                       <div>
-                        <strong>{activeReq.hotel.name}</strong>
-                        <p>从住处出发</p>
+                        <strong>
+                          {startHotel?.name || "从当天第一个景点开始"}
+                        </strong>
+                        <p>
+                          {startHotel
+                            ? day.day === 1 && activeReq.arrival
+                              ? `抵达后预留 ${activeReq.arrival.buffer_minutes} 分钟出站`
+                              : "从已选住处出发"
+                            : "住宿及抵达交通待补齐"}
+                        </p>
                       </div>
                     </div>
                     {day.activities.map((activity, index) => {
                       const place = placeById(activity.place_id);
-                      const leg = day.legs[index];
+                      const leg = day.legs.find(
+                        (leg) => leg.destination_id === activity.place_id,
+                      );
                       return (
                         <div key={activity.id} className="timeline-item">
                           {leg && (
                             <div className="route-note">
-                              {activeReq.transport === "walking" ? (
+                              {leg.mode === "walking" ? (
                                 <Footprints size={13} />
+                              ) : leg.mode === "driving" ? (
+                                <CarFront size={13} />
                               ) : (
                                 <TrainFront size={13} />
                               )}
                               <span>
-                                {activeReq.transport === "walking"
+                                {leg.mode === "walking"
                                   ? "步行"
-                                  : "公共交通估计"}{" "}
+                                  : leg.mode === "driving"
+                                    ? "打车 / 自驾"
+                                    : leg.mode === "transit"
+                                      ? "公交 / 地铁"
+                                      : "交通"}{" "}
                                 {leg.duration_minutes} 分钟
                               </span>
                               <span>含 {10} 分钟衔接余量</span>
+                              {leg.recommendation && (
+                                <p className="leg-recommendation">
+                                  {leg.recommendation}
+                                  {leg.route_status !== "queried" &&
+                                    "（估时，待出发前确认）"}
+                                </p>
+                              )}
+                              {leg.source_ids?.map((id) => {
+                                const source = plan.guides?.sources.find(
+                                  (s) => s.id === id,
+                                );
+                                return source ? (
+                                  <a
+                                    key={id}
+                                    href={source.url}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                  >
+                                    攻略依据 ↗
+                                  </a>
+                                ) : null;
+                              })}
                             </div>
                           )}
                           <article
@@ -1125,6 +1381,12 @@ export default function App() {
                               </span>
                             </div>
                             <h3>{place?.name || activity.place_id}</h3>
+                            {activeReq.place_days?.[activity.place_id] && (
+                              <span className="assigned-day-badge">
+                                你指定在第{" "}
+                                {activeReq.place_days[activity.place_id]} 天
+                              </span>
+                            )}
                             <p className="activity-description">
                               {place?.description}
                             </p>
@@ -1186,34 +1448,46 @@ export default function App() {
                             >
                               <summary>查看信息依据与限制</summary>
                               <p>{place?.evidence_note}</p>
+                              {place?.source_url && (
+                                <a
+                                  href={place.source_url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                >
+                                  查看地点来源 ↗
+                                </a>
+                              )}
                               <p>{leg?.evidence}</p>
                             </details>
                           </article>
                         </div>
                       );
                     })}
-                    {!!day.activities.length && (
-                      <>
-                        <div className="route-note return-note">
-                          <ArrowDown size={13} />
-                          返回住处 · 路途约{" "}
-                          {day.legs.at(-1)?.destination_id === "hotel"
-                            ? day.legs.at(-1)?.duration_minutes
-                            : "未知"}{" "}
-                          分钟
-                        </div>
-                        <div className="hotel-marker end">
-                          <span className="small-dot" />
-                          <div>
-                            <strong>回去休息，好好结束这一天</strong>
-                            <p>
-                              计划 {activeReq.day_end.slice(0, 5)} 前返回 ·
-                              以实际交通为准
-                            </p>
+                    {(!!day.activities.length || !!day.legs.length) &&
+                      endHotel && (
+                        <>
+                          <div className="route-note return-note">
+                            <ArrowDown size={13} />
+                            {day.day === activeReq.days && activeReq.departure
+                              ? "前往返程地点"
+                              : "返回住处"}{" "}
+                            · 路途约{" "}
+                            {day.legs.at(-1)?.duration_minutes ?? "未知"} 分钟
                           </div>
-                        </div>
-                      </>
-                    )}
+                          <div className="hotel-marker end">
+                            <span className="small-dot" />
+                            <div>
+                              <strong>{endHotel.name}</strong>
+                              <p>
+                                {day.day === activeReq.days &&
+                                activeReq.departure
+                                  ? `${activeReq.departure.time.slice(0, 5)} 返程，提前 ${activeReq.departure.buffer_minutes} 分钟到站`
+                                  : `计划 ${activeReq.day_end.slice(0, 5)} 前返回 · 以实际交通为准`}
+                              </p>
+                            </div>
+                          </div>
+                        </>
+                      )}
                   </div>
                 </>
               ) : (
@@ -1240,8 +1514,28 @@ export default function App() {
                   </div>
                 </div>
               )}
+              {plan?.revision_note && (
+                <section className="revision-review" aria-label="调整说明">
+                  <strong>
+                    {plan.revision_status === "model_reviewed"
+                      ? "主 Agent 的调整判断"
+                      : "本次调整说明"}
+                  </strong>
+                  <p>{plan.revision_note}</p>
+                  {!!plan.revision_rounds && (
+                    <p>经过 {plan.revision_rounds} 轮协调与行程检查。</p>
+                  )}
+                  {!!plan.revision_changes?.length && (
+                    <ul className="revision-change-reasons">
+                      {plan.revision_changes.map((change, index) => (
+                        <li key={index}>{change}</li>
+                      ))}
+                    </ul>
+                  )}
+                </section>
+              )}
               {plan && (
-                <section className="validation-card">
+                <section className="validation-card" id="itinerary-checks">
                   <div className="section-label">
                     <ShieldCheck size={16} />
                     <span>行程检查</span>
@@ -1262,6 +1556,19 @@ export default function App() {
                   </ul>
                 </section>
               )}
+              {plan?.lodging && (
+                <HotelPanel
+                  lodging={plan.lodging}
+                  places={planPlaces}
+                  boundaryLocations={{
+                    arrival: activeReq.arrival?.location,
+                    departure: activeReq.departure?.location,
+                  }}
+                  disabled={busy || !!proposal || !trip?.current_version}
+                  needsSave={!!proposal || !trip?.current_version}
+                  onChoose={(choice) => void chooseHotel(choice)}
+                />
+              )}
             </section>
 
             <aside className="insights-column">
@@ -1269,10 +1576,50 @@ export default function App() {
                 day={day}
                 places={planPlaces}
                 cityName={activeReq.city}
-                hotel={activeReq.hotel}
+                hotel={startHotel}
+                endHotel={endHotel}
+                startLabel={
+                  day?.day === 1 && activeReq.arrival ? "抵达地点" : "出发住处"
+                }
+                endLabel={
+                  day?.day === activeReq.days && activeReq.departure
+                    ? "返程地点"
+                    : "住宿"
+                }
                 selected={selectedPlace}
                 onSelect={setSelectedPlace}
               />
+              {plan?.guides && (
+                <section className="guide-card">
+                  <div className="section-label">
+                    <BookOpen size={15} />
+                    <span>攻略参考</span>
+                    <span className="tiny-tag">
+                      {plan.guides.sources.length} 个来源
+                    </span>
+                  </div>
+                  <p className="guide-note">{plan.guides.note}</p>
+                  {plan.guides.sources.map((source, index) => (
+                    <a
+                      className="guide-source"
+                      href={source.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      key={source.id}
+                    >
+                      <strong>
+                        {index + 1}. {source.title} ↗
+                      </strong>
+                      <span>
+                        {source.content_kind === "page_excerpt"
+                          ? "已读取页面片段"
+                          : "搜索摘要参考"}{" "}
+                        · {source.url.replace(/^https?:\/\//, "").split("/")[0]}
+                      </span>
+                    </a>
+                  ))}
+                </section>
+              )}
               <section className="weather-card">
                 <div className="section-label">
                   <CloudSun size={17} />
@@ -1302,34 +1649,74 @@ export default function App() {
                   <Sparkles size={16} />
                   <span>计划变了？一起调整</span>
                 </div>
-                <p>保留已确认的安排，只调整后面的路。</p>
-                <div className="delay-control">
-                  <label htmlFor="delay-minutes">晚出发</label>
-                  <select
-                    id="delay-minutes"
-                    value={delay}
-                    onChange={(e) => setDelay(Number(e.target.value))}
-                  >
-                    <option value={20}>20 分钟</option>
-                    <option value={40}>40 分钟</option>
-                    <option value={60}>60 分钟</option>
-                  </select>
+                <p>
+                  说说想去哪里、哪天去。排不下时会协调其他活动，已选酒店与锁定预约会保留。
+                </p>
+                <label htmlFor="revision-message">想怎样调整？</label>
+                <textarea
+                  id="revision-message"
+                  rows={4}
+                  maxLength={1500}
+                  value={revisionMessage}
+                  placeholder="例如：第2天晚出发40分钟，把博物馆移到第3天，酒店保持不变。"
+                  onChange={(event) => setRevisionMessage(event.target.value)}
+                />
+                <label htmlFor="revision-scope">协调范围</label>
+                <select
+                  id="revision-scope"
+                  value={revisionScope}
+                  onChange={(event) => setRevisionScope(event.target.value)}
+                >
+                  <option value="auto">按需求协调相关日期</option>
+                  <option value="local">
+                    只执行指定修改，其他活动保持不变
+                  </option>
+                  <option value="all_days">允许协调整个行程</option>
+                </select>
+                <label className="reselect-option">
+                  <input
+                    type="checkbox"
+                    checked={reselectPlaces}
+                    onChange={(event) =>
+                      setReselectPlaces(event.target.checked)
+                    }
+                  />
+                  允许重新挑选普通推荐地点
+                </label>
+                <p className="field-hint">
+                  可按需补查新景点。明确指定的地点、日期和必去要求会保留；新增与移除均会先展示。
+                </p>
+                <div className="revision-examples">
                   <button
-                    aria-label="生成延误调整"
-                    disabled={!trip?.current_version || busy || !!proposal}
-                    onClick={() => void adjust("delay")}
+                    type="button"
+                    onClick={() =>
+                      setRevisionMessage(`第${selectedDay}天晚出发40分钟`)
+                    }
                   >
-                    <ArrowRight size={16} />
+                    晚点出发
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setRevisionMessage(`第${selectedDay}天优先室内活动`)
+                    }
+                  >
+                    优先室内
                   </button>
                 </div>
                 <button
-                  className="indoor-button"
-                  disabled={!trip?.current_version || busy || !!proposal}
-                  onClick={() => void adjust("indoor")}
+                  className="outline-button"
+                  aria-label="生成行程调整"
+                  disabled={
+                    !trip?.current_version ||
+                    busy ||
+                    !!proposal ||
+                    !revisionMessage.trim()
+                  }
+                  onClick={() => void reviseFromText()}
                 >
-                  <Umbrella size={15} />
-                  这一天，优先安排室内
-                  <ChevronRight size={14} />
+                  <ArrowRight size={15} />
+                  生成调整预览
                 </button>
                 {!trip?.current_version && (
                   <small>保存第一份行程后，即可尝试调整。</small>
@@ -1371,6 +1758,7 @@ export default function App() {
       </main>
       {settingsOpen && (
         <ApiSettings
+          configPath={configPath}
           config={config}
           onSave={saveSettings}
           onClose={() => setSettingsOpen(false)}

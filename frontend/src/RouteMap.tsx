@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { MapPin } from "lucide-react";
+import { createPortal } from "react-dom";
+import { MapPin, Maximize2, X } from "lucide-react";
 import type { DayPlan, Location, Place } from "./api";
 import { getBrowserConfig } from "./userConfig";
 
@@ -48,13 +49,19 @@ export default function RouteMap({
   day,
   places,
   hotel,
+  endHotel,
+  startLabel = "出发住处",
+  endLabel = "住宿",
   selected,
   onSelect,
   cityName,
 }: {
   day?: DayPlan;
   places: Place[];
-  hotel: Location;
+  hotel?: Location;
+  endHotel?: Location;
+  startLabel?: string;
+  endLabel?: string;
   selected: string | null;
   onSelect: (id: string) => void;
   cityName: string;
@@ -62,15 +69,42 @@ export default function RouteMap({
   const container = useRef<HTMLDivElement>(null);
   const [mapReady, setMapReady] = useState(false);
   const [mapFailed, setMapFailed] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const closeButton = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!expanded) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    closeButton.current?.focus();
+    const close = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setExpanded(false);
+    };
+    window.addEventListener("keydown", close);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", close);
+    };
+  }, [expanded]);
   const points = (day?.activities || [])
     .map((a) => places.find((p) => p.id === a.place_id))
     .filter((p): p is Place => !!p);
+  const stops: { location: Location; id?: string; label: string }[] = [
+    ...(hotel ? [{ location: hotel, label: startLabel }] : []),
+    ...points.map((p, index) => ({
+      location: p,
+      id: p.id,
+      label: String(index + 1),
+    })),
+    ...(endHotel ? [{ location: endHotel, label: endLabel }] : []),
+  ];
   useEffect(() => {
+    setMapReady(false);
+    setMapFailed(false);
     if (
       !getBrowserConfig().amap_js_key ||
       !container.current ||
-      hotel.coordinate_system !== "GCJ-02" ||
-      points.some((p) => p.coordinate_system !== "GCJ-02")
+      !stops.length ||
+      stops.some((p) => p.location.coordinate_system !== "GCJ-02")
     )
       return;
     let cancelled = false;
@@ -78,10 +112,10 @@ export default function RouteMap({
     loadMap()
       .then((AMap) => {
         if (cancelled || !container.current) return;
-        const coords = [
-          [hotel.longitude, hotel.latitude],
-          ...points.map((p) => [p.longitude, p.latitude]),
-        ];
+        const coords = stops.map(({ location: p }) => [
+          p.longitude,
+          p.latitude,
+        ]);
         map = new AMap.Map(container.current, {
           zoom: 13,
           center: coords[0],
@@ -92,14 +126,14 @@ export default function RouteMap({
             (position, index) =>
               new AMap.Marker({
                 position,
-                label: { content: index ? String(index) : "起点" },
+                label: { content: stops[index].label },
               }),
           ),
         );
-        if (points.length)
+        if (coords.length > 1)
           map.add([
             new AMap.Polyline({
-              path: [...coords, coords[0]],
+              path: coords,
               strokeColor: "#265d4c",
               strokeStyle: "dashed",
             }),
@@ -107,16 +141,18 @@ export default function RouteMap({
         map.setFitView();
         setMapReady(true);
       })
-      .catch(() => setMapFailed(true));
+      .catch(() => {
+        if (!cancelled) setMapFailed(true);
+      });
     return () => {
       cancelled = true;
       map?.destroy();
     };
     // Rebuild only when the displayed itinerary changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [day, hotel]);
+  }, [day, hotel, endHotel, expanded]);
 
-  const coords = [hotel, ...points];
+  const coords = stops.map((p) => p.location);
   const minX = Math.min(...coords.map((p) => p.longitude)) - 0.007;
   const maxX = Math.max(...coords.map((p) => p.longitude)) + 0.007;
   const minY = Math.min(...coords.map((p) => p.latitude)) - 0.006;
@@ -125,17 +161,30 @@ export default function RouteMap({
     35 + ((p.longitude - minX) / (maxX - minX)) * 330,
     260 - ((p.latitude - minY) / (maxY - minY)) * 215,
   ];
-  const path = [...coords, hotel]
+  const path = coords
     .map((p, i) => `${i ? "L" : "M"} ${xy(p).join(" ")}`)
     .join(" ");
-  return (
-    <section className="map-card">
+  const card = (
+    <section className={`map-card${expanded ? " map-expanded" : ""}`}>
       <div className="section-label">
         <MapPin size={15} />
         <span>沿途风景</span>
         <span className="tiny-tag">DAY {day?.day || 1}</span>
+        <button
+          type="button"
+          className="map-expand-button"
+          ref={expanded ? closeButton : undefined}
+          aria-label={expanded ? "关闭放大地图" : "放大地图"}
+          onClick={() => setExpanded(!expanded)}
+        >
+          {expanded ? <X size={17} /> : <Maximize2 size={16} />}
+          {expanded ? "收起" : "放大"}
+        </button>
       </div>
-      <div className="map-frame">
+      <div
+        className="map-frame"
+        onDoubleClick={() => !expanded && setExpanded(true)}
+      >
         <div
           ref={container}
           className={`live-map ${mapReady && !mapFailed ? "visible" : ""}`}
@@ -176,7 +225,7 @@ export default function RouteMap({
             <text x="36" y="158" className="lake-label">
               {cityName === "杭州" ? "西 湖" : cityName}
             </text>
-            {points.length > 0 && (
+            {coords.length > 1 && (
               <path
                 d={path}
                 fill="none"
@@ -185,42 +234,40 @@ export default function RouteMap({
                 strokeDasharray="5 6"
               />
             )}
-            {coords.map((p, i) => {
+            {stops.map(({ location: p, id, label }, i) => {
               const [x, y] = xy(p);
               return (
                 <g
                   key={`${p.name}-${i}`}
                   className="map-dot"
-                  onClick={() => i > 0 && onSelect(points[i - 1].id)}
-                  role={i ? "button" : undefined}
-                  tabIndex={i ? 0 : undefined}
-                  onKeyDown={(e) =>
-                    e.key === "Enter" && i > 0 && onSelect(points[i - 1].id)
-                  }
-                  aria-label={i ? `查看${p.name}` : undefined}
+                  onClick={() => id && onSelect(id)}
+                  role={id ? "button" : undefined}
+                  tabIndex={id ? 0 : undefined}
+                  onKeyDown={(e) => e.key === "Enter" && id && onSelect(id)}
+                  aria-label={id ? `查看${p.name}` : undefined}
                 >
                   <circle
                     cx={x}
                     cy={y}
-                    r={i > 0 && points[i - 1].id === selected ? 18 : 14}
-                    fill={i === 0 ? "#fbfaf4" : "#285647"}
-                    stroke={i === 0 ? "#285647" : "#fff"}
+                    r={id && id === selected ? 18 : 14}
+                    fill={id ? "#285647" : "#fbfaf4"}
+                    stroke={id ? "#fff" : "#285647"}
                     strokeWidth="3"
                   />
                   <text
                     x={x}
                     y={y + 4}
                     textAnchor="middle"
-                    fill={i === 0 ? "#285647" : "#fff"}
+                    fill={id ? "#fff" : "#285647"}
                     fontSize="11"
                     fontWeight="700"
                   >
-                    {i || "宿"}
+                    {id ? label : "宿"}
                   </text>
                 </g>
               );
             })}
-            {!points.length && (
+            {!coords.length && (
               <text
                 x="222"
                 y="152"
@@ -240,5 +287,29 @@ export default function RouteMap({
           : "路线示意 · 非真实导航地图，坐标近似"}
       </p>
     </section>
+  );
+  return expanded ? (
+    <>
+      <div className="map-placeholder" />
+      {createPortal(
+        <div
+          className="modal-backdrop map-viewer"
+          role="dialog"
+          aria-modal="true"
+          aria-label={`${cityName}地图放大查看`}
+          onClick={() => setExpanded(false)}
+        >
+          <div
+            className="map-viewer-content"
+            onClick={(event) => event.stopPropagation()}
+          >
+            {card}
+          </div>
+        </div>,
+        document.body,
+      )}
+    </>
+  ) : (
+    card
   );
 }

@@ -3,7 +3,17 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.main import create_app
-from app.schemas import Requirements
+from app.schemas import GuideResearch, Requirements
+
+
+@pytest.fixture(autouse=True)
+def offline_guides(monkeypatch):
+    monkeypatch.setattr("app.agent.research_guides", lambda *_: GuideResearch())
+    from app.amap_gateway import _states
+    from app.research import _cache
+
+    _states.clear()
+    _cache.clear()
 
 
 @pytest.fixture
@@ -17,6 +27,7 @@ def client(tmp_path):
         database_url=f"sqlite:///{(tmp_path / 'test.sqlite3').as_posix()}",
         tool_provider="demo",
         planning_mode="demo",
+        local_api_config_path=tmp_path / "api-config.json",
         _env_file=None,
     )
     with TestClient(create_app(settings)) as client:

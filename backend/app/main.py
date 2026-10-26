@@ -1,19 +1,43 @@
 import asyncio
 import json
 from contextlib import asynccontextmanager
+from typing import Annotated, Any
 
 from alembic import command
 from alembic.config import Config
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
+from fastapi import BackgroundTasks, Body, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from sqlalchemy import inspect, select, update
 
-from app.catalog import demo_catalog
+from app.agent_tasks import task_views
+from app.catalog import decode_catalog, demo_catalog
 from app.config import ROOT, Settings, get_settings
-from app.database import CatalogRecord, ProposalRecord, RunRecord, TripRecord, VersionRecord, build_database
+from app.database import (
+    AgentTaskRecord,
+    CatalogRecord,
+    ProposalRecord,
+    RunRecord,
+    TripRecord,
+    VersionRecord,
+    build_database,
+    now,
+)
 from app.geography import DEFAULT_CITY_ID, get_city, grouped_cities, regions
-from app.schemas import ApplyRequest, CityQuery, ConnectionTest, ProposalRequest, Requirements, RestoreRequest
+from app.local_config import clear_config, config_view, require_local_request, write_config
+from app.schemas import (
+    ApplyRequest,
+    CityQuery,
+    ConnectionTest,
+    HotelChoiceRequest,
+    Itinerary,
+    Location,
+    LocationSearchRequest,
+    NaturalRevisionRequest,
+    ProposalRequest,
+    Requirements,
+    RestoreRequest,
+)
 from app.services import (
     apply_snapshot,
     current_itinerary,
@@ -45,6 +69,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             command.upgrade(config, "head")
         with factory.begin() as db:
             db.execute(
+                update(AgentTaskRecord)
+                .where(AgentTaskRecord.status == "running")
+                .values(status="interrupted", error="服务重启中断了此子任务。", finished_at=now())
+            )
+            db.execute(
                 update(RunRecord)
                 .where(RunRecord.status.in_(["queued", "running"]))
                 .values(status="failed", error="本地服务重启中断了任务，请重新生成；旧确认行程仍保留")
@@ -71,8 +100,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "planning_mode": runtime.planning_mode,
             "catalog_mode": "demo",
             "llm_configured": bool(runtime.llm_base_url and runtime.llm_api_key and runtime.llm_model),
-            "credential_policy": "user_supplied_only",
+            "credential_policy": "project_local_file_or_user_supplied",
         }
+
+    @app.get("/api/settings/local")
+    def get_local_config(request: Request, response: Response):
+        require_local_request(request)
+        response.headers["Cache-Control"] = "no-store"
+        return config_view(settings)
+
+    @app.post("/api/settings/local")
+    def save_local_config(request: Request, response: Response, body: Annotated[Any, Body()]):
+        require_local_request(request)
+        response.headers["Cache-Control"] = "no-store"
+        return write_config(settings, body)
+
+    @app.post("/api/settings/local/clear")
+    def clear_local_config(request: Request, response: Response):
+        require_local_request(request)
+        response.headers["Cache-Control"] = "no-store"
+        return clear_config(settings)
 
     @app.get("/api/geography/countries")
     def countries():
@@ -160,6 +207,41 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             db.flush()
             return trip_view(db, trip)
 
+    @app.post("/api/locations/search")
+    def search_locations(body: LocationSearchRequest, request: Request):
+        runtime = request_settings(settings, request)
+        if runtime.tool_provider == "demo":
+            if body.center is None:
+                raise HTTPException(422, "演示模式需要城市参考位置，或手动填写抵离坐标。")
+            return {
+                "locations": [
+                    body.center.model_copy(update={"name": body.query + "（演示位置）"}).model_dump()
+                ],
+                "note": "演示坐标，不代表真实车站或机场；真实查询请启用高德。",
+            }
+        try:
+            data = TravelTools(runtime, city=body.city)._get(
+                "/v3/place/text",
+                {
+                    "keywords": body.query,
+                    "city": body.city,
+                    "citylimit": "true",
+                    "offset": 5,
+                },
+            )
+            locations = []
+            for poi in data.get("pois", [])[:5]:
+                try:
+                    longitude, latitude = map(float, poi["location"].split(","))
+                    locations.append(
+                        Location(name=poi["name"][:100], longitude=longitude, latitude=latitude).model_dump()
+                    )
+                except (ValueError, KeyError, TypeError):
+                    continue
+            return {"locations": locations, "note": "请选择准确的车站、机场或地址，同名地点请核对坐标。"}
+        except ToolUnavailable as exc:
+            raise HTTPException(400, str(exc)) from exc
+
     @app.get("/api/trips/{trip_id}")
     def get_trip(trip_id: str):
         with factory() as db:
@@ -208,6 +290,44 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         background.add_task(execute_run, factory, runtime, run_id, body)
         return {"run_id": run_id}
 
+    @app.post("/api/trips/{trip_id}/hotel-selections", status_code=202)
+    def choose_hotel(trip_id: str, body: HotelChoiceRequest, background: BackgroundTasks, request: Request):
+        runtime = request_settings(settings, request)
+        with factory.begin() as db:
+            trip = require_trip(db, trip_id)
+            if trip.current_version != body.base_version:
+                raise HTTPException(409, "行程版本已变化，请刷新后选择酒店。")
+            base = current_itinerary(db, trip)
+            if base is None or trip.requirements.get("lodging_mode") != "route_first":
+                raise HTTPException(409, "请先保存一份路线优先的行程草案。")
+            stay = next((n for n in Itinerary(**base).lodging.nights if n.night == body.night), None)
+            if stay is None or not stay.last_place_id or not stay.next_place_id:
+                raise HTTPException(422, "这一晚没有完整的住宿搜索条件。")
+            if body.candidate_id and not any(h.id == body.candidate_id for h in stay.candidates):
+                raise HTTPException(422, "所选酒店不属于这一晚的候选列表。")
+            run = RunRecord(trip_id=trip_id, base_version=body.base_version)
+            db.add(run)
+            db.flush()
+            run_id = run.id
+        background.add_task(execute_run, factory, runtime, run_id, body)
+        return {"run_id": run_id}
+
+    @app.post("/api/trips/{trip_id}/revisions", status_code=202)
+    def revise(trip_id: str, body: NaturalRevisionRequest, background: BackgroundTasks, request: Request):
+        runtime = request_settings(settings, request)
+        with factory.begin() as db:
+            trip = require_trip(db, trip_id)
+            if trip.current_version != body.base_version:
+                raise HTTPException(409, "行程版本已变化，请刷新后重新描述修改。")
+            if current_itinerary(db, trip) is None:
+                raise HTTPException(409, "请先保存路线草案。")
+            run = RunRecord(trip_id=trip_id, base_version=body.base_version)
+            db.add(run)
+            db.flush()
+            run_id = run.id
+        background.add_task(execute_run, factory, runtime, run_id, body)
+        return {"run_id": run_id}
+
     @app.get("/api/runs/{run_id}")
     def get_run(run_id: str):
         with factory() as db:
@@ -220,17 +340,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "status": run.status,
                 "events": run.events,
                 "error": run.error,
+                "agent_tasks": [
+                    {key: value for key, value in task.items() if key not in {"input", "result"}}
+                    for task in task_views(db, run_id)
+                ],
                 "proposal": {
                     "id": proposal.id,
                     "base_version": proposal.base_version,
                     "label": proposal.label,
                     "itinerary": proposal.itinerary,
+                    "requirements": proposal.requirements,
+                    "places": [
+                        p.model_dump()
+                        for p in decode_catalog(
+                            proposal.catalog
+                            if proposal.catalog is not None
+                            else require_trip(db, run.trip_id).catalog
+                        ).values()
+                    ],
                     "applied_version": proposal.applied_version,
                     "dismissed": proposal.dismissed,
                 }
                 if proposal
                 else None,
             }
+
+    @app.get("/api/runs/{run_id}/agent-tasks")
+    def get_agent_tasks(run_id: str):
+        with factory() as db:
+            if db.get(RunRecord, run_id) is None:
+                raise HTTPException(404, "任务不存在")
+            return task_views(db, run_id)
 
     @app.get("/api/runs/{run_id}/events")
     async def run_events(run_id: str, request: Request, after: int = Query(default=0, ge=0)):
@@ -322,6 +462,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 f"restore/{number}",
                 version.itinerary,
                 f"从版本 {number} 恢复",
+                requirements_snapshot=version.requirements,
+                catalog_snapshot=version.catalog,
             )
 
     return app

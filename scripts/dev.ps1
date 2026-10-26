@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 $repoPath = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $pythonPath = Join-Path $repoPath 'backend/.venv/Scripts/python.exe'
 $nodePath = (Get-Command node -ErrorAction Stop).Source
