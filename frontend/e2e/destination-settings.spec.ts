@@ -1,7 +1,11 @@
 import { test, expect } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
-test.beforeEach(async ({ request }) => {
+test.beforeEach(async ({ page, request }) => {
+  // Browser regression must not depend on external font downloads.
+  await page.route(/^https:\/\/fonts\.(googleapis|gstatic)\.com\//, (route) =>
+    route.abort(),
+  );
   const result = await request.post("/api/settings/local/clear", { data: {} });
   expect(result.ok()).toBeTruthy();
 });
@@ -284,6 +288,10 @@ test("project config restores in a clean browser without browser credential stor
   );
   const fresh = await browser.newPage();
   try {
+    await fresh.route(
+      /^https:\/\/fonts\.(googleapis|gstatic)\.com\//,
+      (route) => route.abort(),
+    );
     await fresh.goto(page.url());
     await fresh.getByRole("button", { name: "API 设置", exact: true }).click();
     await expect(fresh.getByLabel("模型 API Key", { exact: true })).toHaveValue(

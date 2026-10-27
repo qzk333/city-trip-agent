@@ -1,6 +1,10 @@
 import { test, expect, type APIRequestContext } from "@playwright/test";
 
-test.beforeEach(async ({ request }) => {
+test.beforeEach(async ({ page, request }) => {
+  // Browser regression must not depend on external font downloads.
+  await page.route(/^https:\/\/fonts\.(googleapis|gstatic)\.com\//, (route) =>
+    route.abort(),
+  );
   await request.post("/api/settings/local/clear", { data: {} });
 });
 test.afterEach(async ({ request }) => {

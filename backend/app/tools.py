@@ -1,4 +1,5 @@
 import math
+import re
 from datetime import UTC, date, datetime
 from time import monotonic
 
@@ -6,13 +7,16 @@ import httpx
 
 from app.amap_gateway import AmapRequestError, amap_get
 from app.config import Settings
+from app.place_evidence import provider_place
 from app.schemas import GuideResearch, Location, Place, RouteLeg, ToolResult
 
 
 class ToolUnavailable(Exception):
-    def __init__(self, message: str, *, fatal: bool = False):
+    def __init__(self, message: str, *, fatal: bool = False, code: str = "tool_unavailable", details=None):
         super().__init__(message)
         self.fatal = fatal
+        self.code = code
+        self.details = details or []
 
 
 def distance_meters(a: Location | Place, b: Location | Place) -> int:
@@ -241,12 +245,22 @@ class TravelTools:
                     adcode = geocodes[0]["adcode"]
                 self.adcode = adcode
                 data = self._get("/v3/weather/weatherInfo", {"city": adcode, "extensions": "all"})
-                casts = [cast for forecast in data.get("forecasts", []) for cast in forecast.get("casts", [])]
                 requested = {(start.fromordinal(start.toordinal() + i)).isoformat() for i in range(days)}
-                matched = [cast for cast in casts if cast.get("date") in requested]
+                casts = {
+                    cast["date"]: {**cast, "reporttime": forecast.get("reporttime", "")}
+                    for forecast in data.get("forecasts", [])
+                    for cast in forecast.get("casts", [])
+                    if cast.get("date") in requested
+                }
+                matched = [casts[day] for day in sorted(casts)]
                 result = ToolResult(
                     status="ok" if len(matched) == days else "partial",
-                    data={"days": matched},
+                    data={
+                        "days": matched,
+                        "requested_start": str(start),
+                        "requested_days": days,
+                        "source_url": "https://lbs.amap.com/api/webservice/guide/api/weatherinfo",
+                    },
                     provider="amap",
                     observed_at=observed,
                     evidence="高德逐日预报；不支持由逐日天气推断具体小时降雨，未覆盖日期保持未知。",
@@ -286,7 +300,7 @@ class TravelTools:
         return location.model_copy(update={"longitude": lon, "latitude": lat, "coordinate_system": "GCJ-02"})
 
     def search_candidates(
-        self, query: str, category: str, anchor: Location | Place | None = None
+        self, query: str, category: str, anchor: Location | Place | None = None, *, limit: int = 5
     ) -> dict[str, Place]:
         """A bounded, city-restricted search through the shared per-key gateway."""
         if self.settings.tool_provider != "amap":
@@ -295,7 +309,7 @@ class TravelTools:
             "keywords": query,
             "city": self.city,
             "citylimit": "true",
-            "offset": 5,
+            "offset": min(6, max(1, limit)),
             "extensions": "base",
         }
         path = "/v3/place/text"
@@ -307,21 +321,24 @@ class TravelTools:
             )
         rows = self._get(path, params).get("pois", [])
         result = {}
-        observed = datetime.now(UTC).isoformat()
-        for row in rows[:5]:
+        for row in rows[:limit]:
             try:
+                if re.search(
+                    r"(?:停车场|售票处|售票点|游客服务中心|公交站|地铁站|入口|出口|出入口)$"
+                    r"|[-－].*(?:路|街|巷)\d+号$",
+                    str(row.get("name", "")),
+                ):
+                    continue
                 typecode = row.get("typecode")
                 allowed_types = (
                     {"05"}
                     if category == "coffee"
-                    else {"06", "11", "14", "19"}
+                    else {"06", "11", "14"}
                     if category == "city"
                     else {"11", "14"}
                 )
                 if isinstance(typecode, str) and len(typecode) >= 2 and typecode[:2] not in allowed_types:
                     continue  # Stations, ticket counters and address labels are not attraction substitutes.
-                longitude, latitude = map(float, row["location"].split(","))
-                location = Location(name=row["name"][:100], longitude=longitude, latitude=latitude)
                 returned_city = row.get("cityname")
                 if (
                     isinstance(returned_city, str)
@@ -329,24 +346,13 @@ class TravelTools:
                     and returned_city.rstrip("市") != self.city.rstrip("市")
                 ):
                     continue
-                pid = "amap-" + str(row["id"])
-                if not row["id"] or len(pid) > 100:
-                    continue
-                result[pid] = Place(
-                    id=pid,
-                    **location.model_dump(),
-                    category=category,
-                    indoor=category in {"culture", "coffee"},
-                    duration_minutes={"nature": 75, "culture": 90, "coffee": 45, "city": 60}[category],
-                    opening=None,
-                    closing=None,
-                    subtitle=row.get("address") or self.city,
-                    source_url=f"https://uri.amap.com/marker?position={longitude},{latitude}",
-                    description="本次调整按需补查的高德地点；停留时长和室内外属性为估算。",
-                    evidence_note=f"高德 POI 增量查询，查询时间 {observed}；"
-                    "营业、预约与建议停留时间尚未核验。",
-                    fixture=False,
-                )
+                adcode = row.get("adcode")
+                if self.adcode and isinstance(adcode, str):
+                    width = 2 if self.adcode in {"110000", "120000", "310000", "500000"} else 4
+                    if adcode[:width] != self.adcode[:width]:
+                        continue
+                place = provider_place(row, category, self.city)
+                result[place.id] = place
             except (ValueError, KeyError, TypeError):
                 continue
         self.trace.append(

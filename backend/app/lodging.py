@@ -47,6 +47,19 @@ def day_boundaries(req: Requirements, lodging: HotelResearch, day: int):
     return start, end
 
 
+def boundary_transfer_needed(req, day, start, end):
+    return bool(
+        start
+        and end
+        and (
+            (day == 1 and req.arrival)
+            or (day == req.days and req.departure)
+            or (start.longitude, start.latitude, start.coordinate_system)
+            != (end.longitude, end.latitude, end.coordinate_system)
+        )
+    )
+
+
 def boundary_window(req: Requirements, day: int, offsets: dict) -> tuple[int, int]:
     def minute(value):
         return value.hour * 60 + value.minute

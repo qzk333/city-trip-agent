@@ -46,6 +46,7 @@ import type {
   Place,
   Proposal,
   Requirements,
+  TravelProfile,
   Run,
   RunEvent,
   Trip,
@@ -56,10 +57,19 @@ import ApiSettings from "./ApiSettings";
 import HotelPanel from "./HotelPanel";
 import BoundaryEditor from "./BoundaryEditor";
 import DestinationSelect from "./DestinationSelect";
+import RecommendationBasis from "./RecommendationBasis";
+import ItineraryChecks from "./ItineraryChecks";
+import { nightMismatch, venuePresentation } from "./planningPresentation";
+import TripHistory from "./TripHistory";
+import TravelPreferences, {
+  candidateRequestKey,
+  emptyProfile,
+} from "./TravelPreferences";
 import { getBrowserConfig } from "./userConfig";
 import type { UserAPIConfig } from "./userConfig";
 
 const storedTripKey = "city-trip:last-trip";
+const confirmedViewKey = "city-trip:confirmed-view";
 function tomorrow() {
   const now = new Date();
   now.setDate(now.getDate() + 1);
@@ -91,22 +101,16 @@ const initial: Requirements = {
   transport: "auto",
   use_web_guides: true,
   pace: "relaxed",
-  interests: ["nature", "culture"],
   must_visit: ["westlake", "gushan_museum"],
   appointments: [],
   note: "",
+  profile: emptyProfile,
 };
 const statusNames: Record<Itinerary["status"], string> = {
   FEASIBLE: "已通过已知约束检查",
   NEEDS_CONFIRMATION: "有信息需要出行前确认",
   CONFLICT: "发现条件冲突",
   NO_SOLUTION_WITHIN_LIMIT: "暂未找到满足条件的方案",
-};
-const interestNames: Record<Place["category"], string> = {
-  nature: "自然风景",
-  culture: "人文展览",
-  coffee: "咖啡休息",
-  city: "城市漫步",
 };
 
 export default function App() {
@@ -130,9 +134,20 @@ export default function App() {
   const [showForm, setShowForm] = useState(true);
   const [config, setConfig] = useState<UserAPIConfig>(getBrowserConfig);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [configPath, setConfigPath] = useState(".local/api-config.json");
   const [catalogLoading, setCatalogLoading] = useState(false);
   const destinationRequest = useRef(0);
+  const [catalogRequestKey, setCatalogRequestKey] = useState<string | null>(
+    null,
+  );
+  const [candidateNote, setCandidateNote] = useState("");
+  const latestCandidateKey = useRef("");
+  latestCandidateKey.current = candidateRequestKey(form);
+  const catalogStale =
+    !!form.catalog_id &&
+    catalogRequestKey !== null &&
+    catalogRequestKey !== candidateRequestKey(form);
   const plan = proposal?.itinerary || trip?.itinerary || null;
   const day = plan?.days.find((d) => d.day === selectedDay) || plan?.days[0];
   const activeReq = proposal?.requirements || trip?.requirements || form;
@@ -179,6 +194,14 @@ export default function App() {
   const activeToolProvider = plan?.tool_provider || health?.tool_provider;
   const planPlaces = proposal?.places || trip?.places || places;
   const placeById = (id: string) => planPlaces.find((p) => p.id === id);
+  const plannedPlaceIds = new Set(
+    plan?.days.flatMap((d) => d.activities.map((a) => a.place_id)) || [],
+  );
+  const alternativeReasons =
+    plan?.planning_decision?.recommendations.filter(
+      (r) => !plannedPlaceIds.has(r.place_id),
+    ) || [];
+
   const routeFirst = activeReq.lodging_mode === "route_first";
   const chosenHotel = (night: number) => {
     const stay = plan?.lodging?.nights.find((stay) => stay.night === night);
@@ -213,6 +236,7 @@ export default function App() {
     setTrip({ ...saved, requirements });
     setForm({ ...requirements, transport: "auto" });
     setPlaces(saved.places);
+    setCatalogRequestKey(candidateRequestKey(requirements));
     setAppointmentOn(saved.requirements.appointments.length > 0);
     return saved;
   }
@@ -220,6 +244,8 @@ export default function App() {
   function changeRegion(country: string, state: string) {
     destinationRequest.current++;
     setPlaces([]);
+    setCatalogRequestKey(null);
+    setCandidateNote("");
     setAppointmentOn(false);
     setForm((f) => ({
       ...f,
@@ -285,25 +311,62 @@ export default function App() {
     setCatalogLoading(true);
     setError("");
     const ticket = ++destinationRequest.current;
+    const requestKey = candidateRequestKey(form);
+    const keepIds = form.catalog_id
+      ? Array.from(
+          new Set([
+            ...form.must_visit,
+            ...(form.appointments || []).map((a) => a.place_id),
+            ...Object.keys(form.place_days || {}),
+          ]),
+        )
+      : [];
     try {
       const result = await api<{
         catalog_id: string;
         places: Place[];
         center: Requirements["hotel"];
-      }>("/places/discover", { city_id: form.city_id });
-      if (ticket !== destinationRequest.current) return;
+        profile: TravelProfile;
+        note: string;
+      }>("/places/recommendations", {
+        city_id: form.city_id,
+        start_date: form.start_date,
+        days: form.days,
+        pace: form.pace,
+        profile: form.profile || emptyProfile,
+        note: form.note,
+        catalog_id: form.catalog_id,
+        keep_ids: keepIds,
+        ...(trip &&
+        trip.requirements.city_id === form.city_id &&
+        form.catalog_id
+          ? { source_trip_id: trip.id, base_version: trip.current_version }
+          : {}),
+      });
+      if (
+        ticket !== destinationRequest.current ||
+        requestKey !== latestCandidateKey.current
+      )
+        return;
       setPlaces(result.places);
-      setAppointmentOn(false);
+      setCatalogRequestKey(requestKey);
+      setCandidateNote(result.note);
       setForm((f) => ({
         ...f,
         catalog_id: result.catalog_id,
-        hotel: result.center,
-        must_visit: [],
-        appointments: [],
+        must_visit: f.must_visit.filter((id) =>
+          result.places.some((p) => p.id === id),
+        ),
       }));
-      setNotice("已载入当前城市地点。请填写实际住处位置，并选择想去的地方。");
+      setNotice(
+        "已按旅行需求更新候选，保留已选择的同城地点。可查看推荐理由与待核实信息。",
+      );
     } catch (e) {
-      setError(e instanceof Error ? e.message : "地点查询失败");
+      if (
+        ticket === destinationRequest.current &&
+        requestKey === latestCandidateKey.current
+      )
+        setError(e instanceof Error ? e.message : "地点查询失败");
     } finally {
       if (ticket === destinationRequest.current) setCatalogLoading(false);
     }
@@ -349,7 +412,10 @@ export default function App() {
           try {
             const saved = await loadTrip(id);
             if (!alive) return;
-            if (saved.latest_run_id) {
+            if (
+              saved.latest_run_id &&
+              localStorage.getItem(confirmedViewKey) !== id
+            ) {
               const run = await api<Run>(`/runs/${saved.latest_run_id}`);
               if (!alive) return;
               setEvents(run.events);
@@ -361,6 +427,7 @@ export default function App() {
               )
                 setProposal(run.proposal);
               if (["queued", "running"].includes(run.status)) {
+                localStorage.removeItem(confirmedViewKey);
                 setBusy(true);
                 try {
                   const finished = await waitForRun(run.id, setEvents);
@@ -395,10 +462,13 @@ export default function App() {
     event.preventDefault();
     setError("");
     setNotice("");
+    localStorage.removeItem(confirmedViewKey);
     setBusy(true);
     setProposal(null);
     setEvents([]);
     try {
+      if (config.tool_provider === "amap" && catalogStale)
+        throw new Error("旅行需求已变化，请先更新候选地点。");
       const req = {
         ...form,
         transport: "auto" as const,
@@ -412,7 +482,9 @@ export default function App() {
                   end: "15:30",
                 },
               ]
-            : [],
+            : fixedExampleAvailable
+              ? []
+              : form.appointments,
       };
       if (
         (req.arrival && !req.arrival.location.name.trim()) ||
@@ -440,6 +512,7 @@ export default function App() {
 
   async function adjust(action: Action, activity?: Activity) {
     if (!trip || proposal) return;
+    localStorage.removeItem(confirmedViewKey);
     setBusy(true);
     setError("");
     setNotice("");
@@ -466,6 +539,7 @@ export default function App() {
 
   async function reviseFromText() {
     if (!trip || proposal || !revisionMessage.trim()) return;
+    localStorage.removeItem(confirmedViewKey);
     setBusy(true);
     setError("");
     setNotice("");
@@ -491,6 +565,7 @@ export default function App() {
 
   async function chooseHotel(choice: HotelChoice) {
     if (!trip || proposal || !trip.current_version) return;
+    localStorage.removeItem(confirmedViewKey);
     setBusy(true);
     setError("");
     setNotice("");
@@ -514,6 +589,7 @@ export default function App() {
 
   async function confirm() {
     if (!trip || !proposal) return;
+    localStorage.removeItem(confirmedViewKey);
     setBusy(true);
     setError("");
     try {
@@ -533,6 +609,7 @@ export default function App() {
 
   async function dismiss() {
     if (!trip || !proposal) return;
+    localStorage.removeItem(confirmedViewKey);
     setBusy(true);
     setError("");
     try {
@@ -556,6 +633,7 @@ export default function App() {
 
   async function restore(number: number) {
     if (!trip) return;
+    localStorage.removeItem(confirmedViewKey);
     setBusy(true);
     setError("");
     try {
@@ -577,6 +655,7 @@ export default function App() {
   function reset() {
     destinationRequest.current++;
     localStorage.removeItem(storedTripKey);
+    localStorage.removeItem(confirmedViewKey);
     setTrip(null);
     setProposal(null);
     setEvents([]);
@@ -587,6 +666,10 @@ export default function App() {
     setSelectedDay(1);
     setShowForm(true);
     setCatalogLoading(false);
+    setSelectedPlace(null);
+    setVersions(null);
+    setRevisionMessage("");
+    setCandidateNote("");
     void api<Place[]>("/places")
       .then(setPlaces)
       .catch(() => setError("地点加载失败，请刷新重试"));
@@ -598,6 +681,23 @@ export default function App() {
         ? f.must_visit.filter((p) => p !== id)
         : [...f.must_visit, id],
     }));
+  }
+
+  async function openHistoricalTrip(id: string) {
+    destinationRequest.current++;
+    await loadTrip(id);
+    localStorage.setItem(storedTripKey, id);
+    localStorage.setItem(confirmedViewKey, id);
+    setProposal(null);
+    setEvents([]);
+    setError("");
+    setNotice("已打开确认保存的行程。");
+    setSelectedDay(1);
+    setSelectedPlace(null);
+    setVersions(null);
+    setRevisionMessage("");
+    setCandidateNote("");
+    setShowForm(false);
   }
   const weather = plan?.weather.data.days?.find((w) => w.date === day?.date);
   const previousActivities =
@@ -638,6 +738,14 @@ export default function App() {
             {config.tool_provider === "amap" ? "我的地图" : "演示地图"}
           </span>
           <button
+            className="text-button history-trigger"
+            disabled={busy || loading || catalogLoading}
+            onClick={() => setHistoryOpen(true)}
+          >
+            <History size={16} />
+            历史行程
+          </button>
+          <button
             className="text-button settings-trigger"
             disabled={busy}
             onClick={() => setSettingsOpen(true)}
@@ -670,11 +778,16 @@ export default function App() {
               onCity={(city) => void selectCity(city)}
               disabled={busy || catalogLoading}
             />
+            <TravelPreferences
+              form={form}
+              onChange={setForm}
+              disabled={busy || catalogLoading}
+            />
             {config.tool_provider === "amap" && (
               <div className="catalog-query">
                 <p>
                   {form.country_code === "CN"
-                    ? "使用自己的 Key 查询当前城市景点与休息点。"
+                    ? "按同行人、兴趣与步行偏好查询当前城市的候选地点。"
                     : "境外可选演示目的地，当前高德标准接口仅支持中国大陆。"}
                 </p>
                 <button
@@ -693,10 +806,16 @@ export default function App() {
                   ) : (
                     <MapPin size={14} />
                   )}
-                  查询城市真实地点
+                  {form.catalog_id ? "按新需求更新候选" : "查询城市真实地点"}
                 </button>
               </div>
             )}
+            {catalogStale && (
+              <p role="status" className="candidate-warning">
+                旅行需求已变化，请更新候选；已选必去地点会保留。
+              </p>
+            )}
+            {candidateNote && <p className="field-hint">{candidateNote}</p>}
             <div className="field-grid">
               <div className="field">
                 <label htmlFor="start-date">出发日期</label>
@@ -920,37 +1039,6 @@ export default function App() {
               </div>
             </fieldset>
             <fieldset>
-              <legend>感兴趣的体验</legend>
-              <div className="interest-options">
-                {Object.entries(interestNames).map(([key, label]) => (
-                  <button
-                    key={key}
-                    type="button"
-                    aria-pressed={form.interests.includes(
-                      key as Place["category"],
-                    )}
-                    className={
-                      form.interests.includes(key as Place["category"])
-                        ? "active"
-                        : ""
-                    }
-                    onClick={() =>
-                      setForm({
-                        ...form,
-                        interests: form.interests.includes(
-                          key as Place["category"],
-                        )
-                          ? form.interests.filter((i) => i !== key)
-                          : [...form.interests, key as Place["category"]],
-                      })
-                    }
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-            </fieldset>
-            <fieldset>
               <legend>
                 一定想去{" "}
                 <span className="legend-hint">
@@ -959,18 +1047,48 @@ export default function App() {
               </legend>
               <div className="place-options">
                 {places.map((p) => (
-                  <label
-                    key={p.id}
-                    className={form.must_visit.includes(p.id) ? "checked" : ""}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={form.must_visit.includes(p.id)}
-                      onChange={() => toggleMust(p.id)}
-                    />
-                    <span>{p.name}</span>
-                    {form.must_visit.includes(p.id) && <Check size={14} />}
-                  </label>
+                  <div key={p.id} className="candidate-option">
+                    <label
+                      className={
+                        form.must_visit.includes(p.id) ? "checked" : ""
+                      }
+                    >
+                      <input
+                        type="checkbox"
+                        checked={form.must_visit.includes(p.id)}
+                        onChange={() => toggleMust(p.id)}
+                      />
+                      <span className="candidate-copy">
+                        <strong>{p.name}</strong>
+                        {p.candidate_match && (
+                          <small>
+                            程序匹配：{p.candidate_match.reasons.join(" · ")}
+                          </small>
+                        )}
+                        {p.traits?.duration_min && (
+                          <small>
+                            建议 {p.traits.duration_min}～
+                            {p.traits.duration_max} 分钟（估算）
+                          </small>
+                        )}
+                        {p.source_url && (
+                          <a
+                            href={p.source_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            查看地点来源
+                          </a>
+                        )}
+                        {p.traits?.unknowns?.length ? (
+                          <small>待核实：{p.traits.unknowns.join("、")}</small>
+                        ) : null}
+                      </span>
+                      {form.must_visit.includes(p.id) && <Check size={14} />}
+                    </label>
+                    <RecommendationBasis place={p} compact />
+                  </div>
                 ))}
               </div>
             </fieldset>
@@ -992,24 +1110,6 @@ export default function App() {
                 <LockKeyhole size={16} />
               </label>
             )}
-            <div className="field">
-              <label htmlFor="note">
-                偏好补充{" "}
-                <span className="optional">
-                  {health?.planning_mode === "llm"
-                    ? "模型参与理解"
-                    : "模型模式下参与规划"}
-                </span>
-              </label>
-              <textarea
-                id="note"
-                maxLength={1000}
-                rows={2}
-                value={form.note}
-                placeholder="例如：更喜欢艺术展览，少安排购物。"
-                onChange={(e) => setForm({ ...form, note: e.target.value })}
-              />
-            </div>
             <button
               className="primary generate-button"
               type="submit"
@@ -1020,7 +1120,8 @@ export default function App() {
                 !health ||
                 form.city_id === null ||
                 !form.timezone ||
-                !catalogReady
+                !catalogReady ||
+                (config.tool_provider === "amap" && catalogStale)
               }
             >
               {busy ? (
@@ -1288,6 +1389,87 @@ export default function App() {
                         : "当前条件下没有排入活动。请查看下方检查结果，或增加可用时间。"}
                     </div>
                   )}
+                  {plan.planning_decision &&
+                    plan.planning_decision.source !== "legacy" && (
+                      <div className="planning-decision" role="note">
+                        <strong>
+                          {plan.planning_decision.source === "model_schedule"
+                            ? "本次由模型安排地点与具体时间"
+                            : plan.planning_decision.source === "model_days"
+                              ? "本次由模型选点与分天"
+                              : plan.planning_decision.source === "model_order"
+                                ? "本次由模型排序、程序分天"
+                                : "本次使用程序规则排程"}
+                        </strong>
+                        <span>
+                          主规划模型请求 {plan.planning_decision.model_calls} 次
+                        </span>
+                        {plan.planning_decision.notes.map((note, i) => (
+                          <p key={i}>{note}</p>
+                        ))}
+                        {alternativeReasons.length > 0 && (
+                          <details className="alternative-reasons">
+                            <summary>
+                              未排入的候选与取舍（{alternativeReasons.length}）
+                            </summary>
+                            {alternativeReasons.map((reason) => (
+                              <div key={reason.place_id}>
+                                <strong>
+                                  {placeById(reason.place_id)?.name ||
+                                    reason.place_id}
+                                </strong>
+                                <RecommendationBasis
+                                  place={placeById(reason.place_id)}
+                                  recommendation={reason}
+                                  sources={plan.guides?.sources || []}
+                                />
+                              </div>
+                            ))}
+                          </details>
+                        )}
+                      </div>
+                    )}
+                  {(day.weather_note || !!day.breaks?.length) && (
+                    <section
+                      className="day-arrangements"
+                      aria-label="当日天气与休息安排"
+                    >
+                      {day.weather_note && (
+                        <p className="day-weather-note">
+                          <CloudSun size={16} />
+                          <span>
+                            <strong>天气安排依据</strong>
+                            {day.weather_note}
+                          </span>
+                        </p>
+                      )}
+                      {!!day.breaks?.length && (
+                        <>
+                          <h3>
+                            <Clock3 size={15} />
+                            用餐、休息与留白
+                          </h3>
+                          <ul>
+                            {day.breaks.map((block, index) => (
+                              <li key={index}>
+                                <time>
+                                  {block.start} — {block.end}
+                                </time>
+                                <span>
+                                  {block.kind === "meal"
+                                    ? "用餐"
+                                    : block.kind === "rest"
+                                      ? "休息"
+                                      : "自由安排"}{" "}
+                                  · {block.reason}
+                                </span>
+                              </li>
+                            ))}
+                          </ul>
+                        </>
+                      )}
+                    </section>
+                  )}
                   <div className="timeline">
                     <div className="hotel-marker">
                       <span className="small-dot" />
@@ -1306,6 +1488,15 @@ export default function App() {
                     </div>
                     {day.activities.map((activity, index) => {
                       const place = placeById(activity.place_id);
+                      const recommendation =
+                        plan.planning_decision?.recommendations.find(
+                          (r) => r.place_id === activity.place_id,
+                        );
+                      const assessment =
+                        plan.planning_decision?.place_assessments?.find(
+                          (a) => a.place_id === activity.place_id,
+                        );
+                      const venue = venuePresentation(place, assessment);
                       const leg = day.legs.find(
                         (leg) => leg.destination_id === activity.place_id,
                       );
@@ -1377,7 +1568,7 @@ export default function App() {
                               <span
                                 className={`category-tag ${place?.category}`}
                               >
-                                {place?.indoor ? "室内为主" : "户外探索"}
+                                {venue.label}
                               </span>
                             </div>
                             <h3>{place?.name || activity.place_id}</h3>
@@ -1390,10 +1581,24 @@ export default function App() {
                             <p className="activity-description">
                               {place?.description}
                             </p>
+                            <RecommendationBasis
+                              place={place}
+                              recommendation={recommendation}
+                              activity={activity}
+                              assessment={assessment}
+                              review={plan.planning_decision?.quality_review}
+                              sources={plan.guides?.sources || []}
+                            />
                             <div className="activity-bottom">
                               <span>
                                 <Sparkles size={12} />
-                                {activity.reason}
+                                {nightMismatch(
+                                  activity,
+                                  recommendation,
+                                  plan.planning_decision?.quality_review,
+                                )
+                                  ? "当前时段尚未落实夜景目标，需调整时间或重新取舍。"
+                                  : activity.reason}
                               </span>
                               <div className="activity-actions">
                                 <button
@@ -1535,26 +1740,10 @@ export default function App() {
                 </section>
               )}
               {plan && (
-                <section className="validation-card" id="itinerary-checks">
-                  <div className="section-label">
-                    <ShieldCheck size={16} />
-                    <span>行程检查</span>
-                    <span className={errors.length ? "error-text" : "muted"}>
-                      {statusNames[plan.status]}
-                    </span>
-                  </div>
-                  <ul>
-                    {plan.checks.map((c, i) => (
-                      <li
-                        key={`${c.code}-${i}`}
-                        className={c.severity === "error" ? "error-text" : ""}
-                      >
-                        <span className={`check-dot ${c.severity}`} />
-                        {c.message}
-                      </li>
-                    ))}
-                  </ul>
-                </section>
+                <ItineraryChecks
+                  plan={plan}
+                  statusLabel={statusNames[plan.status]}
+                />
               )}
               {plan?.lodging && (
                 <HotelPanel
@@ -1599,6 +1788,23 @@ export default function App() {
                     </span>
                   </div>
                   <p className="guide-note">{plan.guides.note}</p>
+                  {plan.guides.discovery_note && (
+                    <div
+                      className="guide-discovery-note"
+                      role="note"
+                      aria-label="攻略补充候选"
+                    >
+                      <p>{plan.guides.discovery_note}</p>
+                      {!!plan.guides.discovered_place_ids?.length && (
+                        <p>
+                          新增候选：
+                          {plan.guides.discovered_place_ids
+                            .map((id) => placeById(id)?.name || id)
+                            .join("、")}
+                        </p>
+                      )}
+                    </div>
+                  )}
                   {plan.guides.sources.map((source, index) => (
                     <a
                       className="guide-source"
@@ -1636,7 +1842,14 @@ export default function App() {
                         ? `${weather.nighttemp}° — ${weather.daytemp}°`
                         : "还没有可靠预报"}
                     </strong>
-                    <p>{weather ? weather.dayweather : "出发前再看一眼天气"}</p>
+                    <p>
+                      {weather
+                        ? `白天${weather.dayweather}${weather.nightweather ? ` · 夜间${weather.nightweather}` : ""}`
+                        : "出发前再看一眼天气"}
+                    </p>
+                    {weather?.reporttime && (
+                      <small>预报发布：{weather.reporttime}</small>
+                    )}
                   </div>
                 </div>
                 <p className="subtle-copy">
@@ -1762,6 +1975,15 @@ export default function App() {
           config={config}
           onSave={saveSettings}
           onClose={() => setSettingsOpen(false)}
+        />
+      )}
+      {historyOpen && (
+        <TripHistory
+          onClose={() => setHistoryOpen(false)}
+          onOpen={openHistoricalTrip}
+          onDeleted={(id) => {
+            if (trip?.id === id) reset();
+          }}
         />
       )}
       {versions && (

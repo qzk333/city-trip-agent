@@ -2,6 +2,7 @@
 
 import json
 import re
+from collections import Counter
 from time import monotonic
 from typing import Literal
 
@@ -9,9 +10,12 @@ import httpx
 from pydantic import Field
 
 from app.config import Settings
-from app.lodging import boundary_window, hotel_candidate, trip_points
+from app.lodging import boundary_window, day_boundaries, hotel_candidate, trip_points
+from app.place_evidence import shelter_assessment
 from app.planner import TRANSFER_BUFFER, build_plan, clock, minutes
-from app.schemas import Check, Itinerary, Place, Requirements, Schema
+from app.planning_context import weather_context
+from app.schemas import Check, Itinerary, Place, Requirements, ScheduledDay, Schema
+from app.timed_planning import incoming_legs
 from app.tools import ToolUnavailable, TravelTools
 from app.user_config import model_request_options, public_model_post
 from app.validation import validate_itinerary
@@ -23,7 +27,7 @@ class EditOperation(Schema):
     place_id: str | None = None
     target_day: int | None = Field(default=None, ge=1, le=3)
     minutes: int = Field(default=0, ge=-180, le=180)
-    place_ids: list[str] = Field(default_factory=list, max_length=20)
+    place_ids: list[str] = Field(default_factory=list)
     start: str | None = None
     end: str | None = None
     at: str | None = None
@@ -55,6 +59,7 @@ class HotelReview(Schema):
     decision: Literal["keep", "adjust"]
     rationale: str = Field(min_length=1, max_length=400)
     operations: list[EditOperation] = Field(default_factory=list, max_length=5)
+    daily_schedule: list[ScheduledDay] | None = None
 
 
 def model_json(settings: Settings, system: str, payload: dict, schema, tools: TravelTools):
@@ -81,7 +86,7 @@ def model_json(settings: Settings, system: str, payload: dict, schema, tools: Tr
                     {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
                 ],
                 "response_format": {"type": "json_object"},
-                "max_tokens": 1800,
+                "max_tokens": 4500 if schema.__name__ in {"RepairPlan", "HotelReview"} else 1800,
             },
         )
         response.raise_for_status()
@@ -133,6 +138,7 @@ def revision_context(req: Requirements, base: Itinerary, catalog: dict[str, Plac
         ),
         "days": [day.model_dump(mode="json") for day in base.days],
         "day_start_offsets": base.day_start_offsets,
+        "weather": weather_context(req, base.weather),
         "selected_hotels": [
             {
                 "night": stay.night,
@@ -146,7 +152,18 @@ def revision_context(req: Requirements, base: Itinerary, catalog: dict[str, Plac
             {
                 "id": p.id,
                 "name": p.name,
-                "indoor": p.indoor,
+                "indoor": (
+                    True
+                    if shelter_assessment(p, base.planning_decision.place_assessments)[0] == "indoor"
+                    else False
+                    if shelter_assessment(p, base.planning_decision.place_assessments)[0] == "outdoor"
+                    else None
+                ),
+                "indoor_outdoor_assessment": shelter_assessment(p, base.planning_decision.place_assessments)[
+                    0
+                ],
+                "assessment_basis": shelter_assessment(p, base.planning_decision.place_assessments)[1],
+                "traits": p.traits.model_dump(mode="json"),
                 "duration_minutes": p.duration_minutes,
                 "longitude": p.longitude,
                 "latitude": p.latitude,
@@ -231,7 +248,8 @@ def interpret_revision(message: str, req: Requirements, base: Itinerary, catalog
             "支持推迟/提前出发(delay)、移除(remove)、增加(add)、移动日期(move)、同日完整重排(reorder)、"
             "优先室内(indoor)、更改单日时段(day_window,start/end为HH:MM)、修改抵达/返程时间(arrival/departure,at为HH:MM)。"
             "arrival/departure 的 location_id 只能是目录已有 ID、arrival 或 departure；未确认新地点要澄清。"
-            "reorder 必须包含该日全部活动 ID；move 指明原 day 和 target_day。不能修改锁定活动或预约。"
+            "reorder 返回该日全部地点ID的顺序，重访保留其出现次数；move指明原day与target_day。"
+            "不能修改锁定活动或预约。"
             "保留酒店、旅行日期、城市、预约和锁定活动。"
             "place_days 是用户先前指定的地点日期，新要求明确移动该地点才可改。"
             "默认 scope=related_days：允许在操作的来源/目标日期间协调其他普通活动；全程优化用all_days。"
@@ -266,9 +284,23 @@ def revise_route(
         raise ToolUnavailable("需要补充说明：" + intent.clarification)
     if not intent.operations:
         raise ToolUnavailable("没有识别到可执行的修改，请说明日期、地点和希望的变化。")
+    for operation in intent.operations:
+        if (
+            operation.kind in {"remove", "move"}
+            and sum(
+                a.place_id == operation.place_id
+                for day in base.days
+                if day.day == operation.day
+                for a in day.activities
+            )
+            > 1
+        ):
+            raise ToolUnavailable(
+                "该日此地点有多次到访，当前修改无法确定具体一次；请使用对应时段的活动卡片精确操作。"
+            )
     raw = req.model_dump(mode="json")
     per_day = {str(d.day): [a.place_id for a in d.activities] for d in base.days}
-    locked = {a.place_id for d in base.days for a in d.activities if a.locked}
+    locked = {(d.day, a.place_id) for d in base.days for a in d.activities if a.locked}
     offsets = dict(base.day_start_offsets)
     affected = set()
     for operation in intent.operations:
@@ -311,21 +343,30 @@ def revise_route(
             keep = [
                 pid
                 for pid in ids
-                if catalog[pid].indoor or pid in locked or pid in req.must_visit or pid in req.place_days
+                if shelter_assessment(catalog[pid], base.planning_decision.place_assessments)[0] == "indoor"
+                or (day, pid) in locked
+                or pid in req.must_visit
+                or pid in req.place_days
             ]
             used = {pid for d, group in per_day.items() if d != str(day) for pid in group}
-            options = [p.id for p in catalog.values() if p.indoor and p.id not in used and p.id not in keep]
+            options = [
+                p.id
+                for p in catalog.values()
+                if shelter_assessment(p, base.planning_decision.place_assessments)[0] == "indoor"
+                and p.id not in used
+                and p.id not in keep
+            ]
             per_day[str(day)] = [*keep, *options[: max(0, len(ids) - len(keep))]]
         elif operation.kind == "reorder":
-            if set(operation.place_ids) != set(ids) or len(operation.place_ids) != len(ids):
-                raise ToolUnavailable("重排必须保留该日全部地点，不能新增、丢失或重复地点。")
+            if Counter(operation.place_ids) != Counter(ids):
+                raise ToolUnavailable("重排必须保留该日全部到访，不能擅自新增或丢失访问次数。")
             per_day[str(day)] = operation.place_ids
         else:
             pid = operation.place_id
             if pid not in catalog:
                 raise ToolUnavailable("修改涉及未确认的地点，请先从当前地点目录选择。")
             if operation.kind in {"remove", "move"}:
-                if pid not in ids or pid in locked:
+                if pid not in ids or (day, pid) in locked:
                     raise ToolUnavailable("该活动不存在于指定日期，或已经锁定，不能移除或移动。")
                 if operation.kind == "remove" and pid in raw["must_visit"]:
                     alias = catalog[pid].name.split("·")[0].strip()
@@ -335,17 +376,17 @@ def revise_route(
                         or not re.search(r"不去|取消|删除|移除|去掉|不要", user_message)
                     ):
                         raise ToolUnavailable("必去地点不能由模型自行移除，请明确说明不去哪个地点。")
-                    raw["must_visit"].remove(pid)
+                    if sum(group.count(pid) for group in per_day.values()) == 1:
+                        raw["must_visit"].remove(pid)
                 ids.remove(pid)
                 if operation.kind == "remove":
                     if pid in raw["place_days"] and (
                         not user_message or catalog[pid].name.split("·")[0].strip() not in user_message
                     ):
                         raise ToolUnavailable("用户指定的地点不能由模型自行移除。")
-                    raw["place_days"].pop(pid, None)
+                    if raw["place_days"].get(pid) == day:
+                        raw["place_days"].pop(pid, None)
             if operation.kind == "add":
-                if any(pid in group for group in per_day.values()):
-                    raise ToolUnavailable("该地点已在行程中，请使用移动或重排来调整。")
                 ids.append(pid)
                 if user_message:
                     raw["place_days"][pid] = day
@@ -396,8 +437,15 @@ def revise_route(
             old_start, _ = boundary_window(req, day.day, base.day_start_offsets)
             cursor, _ = boundary_window(updated, day.day, offsets)
             shift = cursor - old_start
-            for activity in day.activities:
-                incoming = next((leg for leg in day.legs if leg.destination_id == activity.place_id), None)
+            for block in day.breaks:
+                start, end = minutes(block.start) + shift, minutes(block.end) + shift
+                if start < 0 or end >= 24 * 60:
+                    raise ToolUnavailable("调整后用餐或休息跨越午夜，请减少延误或重新安排。")
+                block.start, block.end = clock(start), clock(end)
+            _, (_, returning) = day_boundaries(updated, result.lodging, day.day)
+            for activity, incoming in zip(
+                day.activities, incoming_legs(day.activities, day.legs, returning), strict=True
+            ):
                 earliest = cursor + (incoming.duration_minutes + TRANSFER_BUFFER if incoming else 0)
                 if not activity.locked:
                     duration = minutes(activity.end) - minutes(activity.start)
@@ -470,6 +518,8 @@ def review_hotel_choice(req: Requirements, result: Itinerary, night: int, tools,
         result.revision_note = "演示模式已完成交通和时间检查，未请求模型复核。"
         return result
     try:
+        fixed = {"fixed": [a.model_dump() for d in result.days for a in d.activities if a.locked]}
+        allowed_days = {night, night + 1}
         review = model_json(
             tools.settings,
             (
@@ -477,30 +527,70 @@ def review_hotel_choice(req: Requirements, result: Itinerary, night: int, tools,
                 "根据已查询的交通、时间和冲突，判断是否需要调整相邻两天行程。"
                 "酒店已由用户选择，不能换酒店、改变抵离边界、预约、锁定活动、必去要求或其他日期。"
                 "可以在相邻两天内重排或移动未锁定活动；时间足够时保持原计划。不得新造地点或交通。"
-                "decision=keep 时 operations 必须为空；adjust 时返回可执行的 reorder/move 操作。"
+                "评估完整活动、用餐休息和实际接驳，不限定活动数量，不优先填补某个时段。"
+                "decision=keep 时 operations 必须为空且 daily_schedule 为 null。"
+                "需要调整时优先返回 daily_schedule，完整包含相邻两天的活动具体起止时间、用餐休息，"
+                "保留全部已选活动的访问次数，不得增加或删除活动；可重排、跨这两天移动，"
+                "必须保留预约和锁定时刻。operations 此时为空。"
+                "旧版兼容方式可仅返回 reorder/move 操作，不能与 daily_schedule 同时使用。"
+                "现有时间冲突未解决时不能声称 keep 或调整已完成。"
             ),
             {**revision_context(req, result, catalog), "changed_night": night},
             HotelReview,
             tools,
         )
         if review.decision == "adjust":
-            if not review.operations or any(op.kind not in {"reorder", "move"} for op in review.operations):
-                raise ToolUnavailable("模型复核超出可执行范围。")
-            _, revised = revise_route(
-                req,
-                result,
-                RevisionIntent(summary=review.rationale, operations=review.operations),
-                tools,
-                catalog,
-                allowed_days={night, night + 1},
-            )
-            if any(c.severity == "error" for c in revised.checks) and not any(
-                c.severity == "error" for c in result.checks
-            ):
+            if review.daily_schedule is not None:
+                if review.operations:
+                    raise ToolUnavailable("模型复核不能同时提交时间表和操作。")
+                scheduled = {d.day: d for d in review.daily_schedule}
+                expected = Counter(
+                    a.place_id for d in result.days if d.day in allowed_days for a in d.activities
+                )
+                actual = Counter(a.place_id for d in review.daily_schedule for a in d.activities)
+                if (
+                    len(scheduled) != len(review.daily_schedule)
+                    or set(scheduled) != allowed_days
+                    or actual != expected
+                ):
+                    raise ToolUnavailable("酒店时间表须完整覆盖相邻两天并保留原有到访。")
+                options = {
+                    **fixed,
+                    "model_schedule": [d.model_dump() for d in review.daily_schedule],
+                    "frozen_days": [d.model_dump() for d in result.days if d.day not in allowed_days],
+                    "preserved_activity_ids": [a.model_dump() for d in result.days for a in d.activities],
+                    "delays": result.day_start_offsets,
+                    "lodging": result.lodging.model_dump(mode="json"),
+                    "weather_snapshot": result.weather.model_dump(mode="json"),
+                }
+                tools.guides = result.guides
+                revised = build_plan(req, list(catalog), tools, options, catalog)
+                revised.planning_decision = result.planning_decision.model_copy(deep=True)
+                revised.planning_decision.source = "model_schedule"
+                revised = validate_itinerary(req, revised, fixed, catalog)
+                refresh_lodging(req, revised, catalog)
+                revised.trace = [*result.trace, *tools.trace]
+            else:
+                if not review.operations or any(
+                    op.kind not in {"reorder", "move"} for op in review.operations
+                ):
+                    raise ToolUnavailable("模型复核超出可执行范围。")
+                _, revised = revise_route(
+                    req,
+                    result,
+                    RevisionIntent(summary=review.rationale, operations=review.operations),
+                    tools,
+                    catalog,
+                    allowed_days=allowed_days,
+                )
+            if any(c.severity == "error" for c in revised.checks):
                 raise ToolUnavailable("模型方案未通过独立校验。")
             result = revised
-        elif review.operations:
+        elif review.operations or review.daily_schedule is not None:
             raise ToolUnavailable("模型复核的保持结论与操作矛盾。")
+        result = validate_itinerary(req, result, fixed, catalog)
+        if any(c.severity == "error" for c in result.checks):
+            raise ToolUnavailable("酒店变更后的时间冲突尚未解决。")
         result.revision_status = "model_reviewed"
         result.revision_note = review.rationale
     except ToolUnavailable:

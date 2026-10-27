@@ -21,6 +21,7 @@ from app.database import (
 from app.geography import DEFAULT_CITY_ID, get_city, validate_destination
 from app.hotel_routes import select_hotel
 from app.replanning import run_revision
+from app.review_agent import audit_schedule, current_review
 from app.revisions import interpret_revision, review_hotel_choice
 from app.schemas import (
     HotelChoiceRequest,
@@ -31,6 +32,7 @@ from app.schemas import (
     Requirements,
 )
 from app.tools import ToolUnavailable, TravelTools
+from app.travel_profile import discovery_fingerprint
 from app.validation import validate_itinerary
 
 
@@ -69,6 +71,17 @@ def prepare_trip(db, req: Requirements):
         snapshot = db.get(CatalogRecord, normalized.catalog_id)
         if snapshot is None or snapshot.city_id != normalized.city_id:
             raise HTTPException(422, "地点目录与目的地不匹配，请重新加载城市地点")
+        fingerprint = snapshot.discovery.get("fingerprint")
+        current = discovery_fingerprint(
+            normalized.city_id,
+            normalized.start_date,
+            normalized.days,
+            normalized.pace,
+            normalized.profile,
+            normalized.note,
+        )
+        if fingerprint and fingerprint != current:
+            raise HTTPException(422, "旅行需求已变化，请先按新需求更新候选地点；已选地点会保留。")
         catalog = decode_catalog(snapshot.places, normalized.city_id)
     else:
         catalog = demo_catalog(normalized.city_id)
@@ -92,7 +105,7 @@ def trip_view(db, trip: TripRecord) -> dict:
     )
     return {
         "id": trip.id,
-        "requirements": trip.requirements,
+        "requirements": Requirements(**trip.requirements).model_dump(mode="json"),
         "current_version": trip.current_version,
         "itinerary": current_itinerary(db, trip),
         "latest_run_id": latest_run.id if latest_run else None,
@@ -110,7 +123,7 @@ def make_overrides(base: dict, request: ProposalRequest) -> dict:
     if request.action == "delay":
         key = str(request.day)
         delays[key] = delays.get(key, 0) + request.delay_minutes
-    return {
+    options = {
         "fixed": [a for a in day["activities"] if a["locked"]],
         "preferred": [a["place_id"] for a in day["activities"]],
         "frozen_days": [d for d in base["days"] if d["day"] != request.day],
@@ -118,6 +131,31 @@ def make_overrides(base: dict, request: ProposalRequest) -> dict:
         "indoor": request.action == "indoor",
         "lodging": base.get("lodging", {}),
     }
+    if base.get("planning_decision", {}).get("source") == "model_schedule" and request.action in {
+        "remove",
+        "delay",
+    }:
+        remaining = [
+            a
+            for d in base["days"]
+            for a in d["activities"]
+            if not (request.action == "remove" and a["id"] == request.activity_id)
+        ]
+        options["preserved_activity_ids"] = remaining
+        options["model_schedule"] = [
+            {
+                "day": d["day"],
+                "activities": [
+                    {k: a[k] for k in ("place_id", "start", "end", "reason", "time_intent") if k in a}
+                    for a in remaining
+                    if a["day"] == d["day"]
+                ],
+                "breaks": d.get("breaks", []),
+                "weather_note": d.get("weather_note", ""),
+            }
+            for d in base["days"]
+        ]
+    return options
 
 
 def legacy_place_days(db, trip_id, number, base):
@@ -202,6 +240,7 @@ def execute_run(
             if base and version and "place_days" not in (version.requirements or trip.requirements):
                 requirements.place_days = legacy_place_days(db, trip.id, run.base_version, base)
         overrides = {}
+        original_catalog_ids = set(catalog)
         label = "首次行程" if base is None else "重新生成行程"
         if isinstance(request, NaturalRevisionRequest):
             if base is None:
@@ -228,6 +267,7 @@ def execute_run(
                     catalog,
                     message=request.message,
                     emit=emit,
+                    journal=journal,
                 )
                 task.complete(
                     {
@@ -253,6 +293,11 @@ def execute_run(
                 result = select_hotel(requirements, Itinerary(**base), request, tools, catalog)
                 emit("reviewing", "主 Agent 复核住宿变化是否需要重排行程，再进行独立检查")
                 result = review_hotel_choice(requirements, result, request.night, tools, catalog)
+                if not current_review(requirements, result, catalog):
+                    fixed = {"fixed": [a for d in base["days"] for a in d["activities"] if a["locked"]]}
+                    result = validate_itinerary(requirements, result, fixed, catalog)
+                    audit_schedule(requirements, result, catalog, tools, journal=journal, emit=emit)
+                    result = validate_itinerary(requirements, result, fixed, catalog)
                 task.complete(
                     {
                         "night": request.night,
@@ -294,10 +339,28 @@ def execute_run(
                     ]
                 result = generate(requirements, settings, emit, overrides, catalog, journal=journal)
         else:
-            result = generate(requirements, settings, emit, catalog=catalog, journal=journal)
+            result = generate(
+                requirements, settings, emit, catalog=catalog, journal=journal, catalog_updates=catalog
+            )
         emit("completed", "结果已生成，请检查待确认信息和修改预览")
         with factory.begin() as db:
             run = db.get(RunRecord, run_id)
+            added_ids = sorted(set(catalog) - original_catalog_ids)
+            if added_ids:
+                previous_catalog = (
+                    db.get(CatalogRecord, requirements.catalog_id) if requirements.catalog_id else None
+                )
+                snapshot = CatalogRecord(
+                    city_id=requirements.city_id or DEFAULT_CITY_ID,
+                    places={pid: p.model_dump() for pid, p in catalog.items()},
+                    discovery={
+                        **(previous_catalog.discovery if previous_catalog else {}),
+                        "expanded_place_ids": added_ids,
+                    },
+                )
+                db.add(snapshot)
+                db.flush()
+                requirements = requirements.model_copy(update={"catalog_id": snapshot.id})
             proposal = ProposalRecord(
                 trip_id=run.trip_id,
                 base_version=run.base_version,
@@ -346,6 +409,7 @@ def apply_snapshot(
     if trip.current_version != base_version:
         raise HTTPException(409, "行程版本已经变化，请加载最新版本后重新操作")
     snapshot = requirements_snapshot or (proposal.requirements if proposal else None) or trip.requirements
+    snapshot = Requirements(**snapshot).model_dump(mode="json")
     places = (
         catalog_snapshot
         if catalog_snapshot is not None

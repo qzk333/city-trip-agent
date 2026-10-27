@@ -1,0 +1,808 @@
+{
+  "version": "travel-quality-v1",
+  "scope": "Self-authored synthetic POIs and routes; compares ranking/spatial scheduling only, not live search or factual tourism quality.",
+  "places": [
+    {
+      "id": "history-0",
+      "name": "自建0区历史博物馆0",
+      "category": "culture",
+      "longitude": 120.1,
+      "latitude": 30.25,
+      "themes": [
+        "history"
+      ],
+      "duration_minutes": 60
+    },
+    {
+      "id": "night-0",
+      "name": "自建1区滨水夜景0",
+      "category": "city",
+      "longitude": 120.22,
+      "latitude": 30.25,
+      "themes": [
+        "night"
+      ],
+      "duration_minutes": 60
+    },
+    {
+      "id": "nature-0",
+      "name": "自建2区公园0",
+      "category": "nature",
+      "longitude": 120.33999999999999,
+      "latitude": 30.25,
+      "themes": [
+        "nature"
+      ],
+      "duration_minutes": 60
+    },
+    {
+      "id": "history-1",
+      "name": "自建0区历史博物馆1",
+      "category": "culture",
+      "longitude": 120.103,
+      "latitude": 30.251,
+      "themes": [
+        "history"
+      ],
+      "duration_minutes": 60
+    },
+    {
+      "id": "night-1",
+      "name": "自建1区滨水夜景1",
+      "category": "city",
+      "longitude": 120.223,
+      "latitude": 30.251,
+      "themes": [
+        "night"
+      ],
+      "duration_minutes": 60
+    },
+    {
+      "id": "nature-1",
+      "name": "自建2区公园1",
+      "category": "nature",
+      "longitude": 120.34299999999999,
+      "latitude": 30.251,
+      "themes": [
+        "nature"
+      ],
+      "duration_minutes": 60
+    },
+    {
+      "id": "history-2",
+      "name": "自建0区历史博物馆2",
+      "category": "culture",
+      "longitude": 120.106,
+      "latitude": 30.252,
+      "themes": [
+        "history"
+      ],
+      "duration_minutes": 60
+    },
+    {
+      "id": "night-2",
+      "name": "自建1区滨水夜景2",
+      "category": "city",
+      "longitude": 120.226,
+      "latitude": 30.252,
+      "themes": [
+        "night"
+      ],
+      "duration_minutes": 60
+    },
+    {
+      "id": "nature-2",
+      "name": "自建2区公园2",
+      "category": "nature",
+      "longitude": 120.34599999999999,
+      "latitude": 30.252,
+      "themes": [
+        "nature"
+      ],
+      "duration_minutes": 60
+    },
+    {
+      "id": "architecture",
+      "name": "自建建筑老街",
+      "category": "city",
+      "longitude": 120.102,
+      "latitude": 30.252,
+      "themes": [
+        "architecture",
+        "photo"
+      ],
+      "duration_minutes": 60
+    },
+    {
+      "id": "food",
+      "name": "自建地方美食街",
+      "category": "city",
+      "longitude": 120.225,
+      "latitude": 30.252,
+      "themes": [
+        "food"
+      ],
+      "duration_minutes": 60
+    },
+    {
+      "id": "coffee",
+      "name": "自建咖啡馆",
+      "category": "coffee",
+      "longitude": 120.224,
+      "latitude": 30.254,
+      "themes": [
+        "coffee"
+      ],
+      "duration_minutes": 45
+    },
+    {
+      "id": "mall",
+      "name": "自建购物商场",
+      "category": "city",
+      "longitude": 120.341,
+      "latitude": 30.254,
+      "themes": [],
+      "duration_minutes": 60
+    }
+  ],
+  "cases": [
+    {
+      "id": "history",
+      "requirements": {
+        "note": "喜欢历史",
+        "days": 1,
+        "profile": {
+          "themes": [
+            "culture"
+          ]
+        }
+      },
+      "relevant_themes": [
+        "history"
+      ],
+      "expected_blocked": false,
+      "split": "development",
+      "baseline_categories": [
+        "culture"
+      ]
+    },
+    {
+      "id": "night",
+      "requirements": {
+        "note": "夜景拍照",
+        "days": 1,
+        "profile": {
+          "themes": [
+            "city"
+          ]
+        }
+      },
+      "relevant_themes": [
+        "night",
+        "photo"
+      ],
+      "expected_blocked": false,
+      "split": "development",
+      "baseline_categories": [
+        "city"
+      ]
+    },
+    {
+      "id": "architecture",
+      "requirements": {
+        "note": "喜欢建筑",
+        "days": 1,
+        "profile": {
+          "themes": [
+            "city"
+          ]
+        }
+      },
+      "relevant_themes": [
+        "architecture"
+      ],
+      "expected_blocked": false,
+      "split": "development",
+      "baseline_categories": [
+        "city"
+      ]
+    },
+    {
+      "id": "nature",
+      "requirements": {
+        "note": "喜欢自然公园",
+        "days": 1,
+        "profile": {
+          "themes": [
+            "nature"
+          ]
+        }
+      },
+      "relevant_themes": [
+        "nature"
+      ],
+      "expected_blocked": false,
+      "split": "development",
+      "baseline_categories": [
+        "nature"
+      ]
+    },
+    {
+      "id": "food",
+      "requirements": {
+        "note": "想吃当地美食",
+        "days": 1,
+        "profile": {
+          "themes": [
+            "city"
+          ]
+        }
+      },
+      "relevant_themes": [
+        "food"
+      ],
+      "expected_blocked": false,
+      "split": "development",
+      "baseline_categories": [
+        "city"
+      ]
+    },
+    {
+      "id": "coffee",
+      "requirements": {
+        "note": "咖啡探店",
+        "days": 1,
+        "profile": {
+          "themes": [
+            "coffee"
+          ]
+        }
+      },
+      "relevant_themes": [
+        "coffee"
+      ],
+      "expected_blocked": false,
+      "split": "development",
+      "baseline_categories": [
+        "coffee"
+      ]
+    },
+    {
+      "id": "parents-history",
+      "requirements": {
+        "note": "带父母，历史，少走路",
+        "days": 2,
+        "profile": {
+          "themes": [
+            "culture"
+          ]
+        }
+      },
+      "relevant_themes": [
+        "history"
+      ],
+      "expected_blocked": false,
+      "split": "development",
+      "baseline_categories": [
+        "culture"
+      ]
+    },
+    {
+      "id": "friends-night",
+      "requirements": {
+        "note": "朋友旅行，夜景摄影",
+        "days": 2,
+        "profile": {
+          "themes": [
+            "city"
+          ]
+        }
+      },
+      "relevant_themes": [
+        "night",
+        "photo"
+      ],
+      "expected_blocked": false,
+      "split": "development",
+      "baseline_categories": [
+        "city"
+      ]
+    },
+    {
+      "id": "family-nature",
+      "requirements": {
+        "note": "带孩子，喜欢公园",
+        "days": 2,
+        "profile": {
+          "themes": [
+            "nature"
+          ]
+        }
+      },
+      "relevant_themes": [
+        "nature"
+      ],
+      "expected_blocked": false,
+      "split": "development",
+      "baseline_categories": [
+        "nature"
+      ]
+    },
+    {
+      "id": "no-mall",
+      "requirements": {
+        "note": "建筑街区，不去商场",
+        "days": 2,
+        "profile": {
+          "themes": [
+            "city"
+          ]
+        }
+      },
+      "relevant_themes": [
+        "architecture"
+      ],
+      "expected_blocked": false,
+      "split": "development",
+      "baseline_categories": [
+        "city"
+      ]
+    },
+    {
+      "id": "no-coffee",
+      "requirements": {
+        "note": "文博，不喜欢咖啡",
+        "days": 2,
+        "profile": {
+          "themes": [
+            "culture"
+          ]
+        }
+      },
+      "relevant_themes": [
+        "history"
+      ],
+      "expected_blocked": false,
+      "split": "development",
+      "baseline_categories": [
+        "culture"
+      ]
+    },
+    {
+      "id": "three-regions",
+      "requirements": {
+        "note": "文化与自然",
+        "days": 3,
+        "profile": {
+          "themes": [
+            "culture",
+            "nature"
+          ]
+        }
+      },
+      "relevant_themes": [
+        "history",
+        "nature"
+      ],
+      "expected_blocked": false,
+      "split": "development",
+      "baseline_categories": [
+        "culture",
+        "nature"
+      ]
+    },
+    {
+      "id": "history-two",
+      "requirements": {
+        "note": "历史博物馆",
+        "days": 2,
+        "profile": {
+          "themes": [
+            "culture"
+          ]
+        }
+      },
+      "relevant_themes": [
+        "history"
+      ],
+      "expected_blocked": false,
+      "split": "development",
+      "baseline_categories": [
+        "culture"
+      ]
+    },
+    {
+      "id": "history-three",
+      "requirements": {
+        "note": "文博主题游",
+        "days": 3,
+        "profile": {
+          "themes": [
+            "culture"
+          ]
+        }
+      },
+      "relevant_themes": [
+        "history"
+      ],
+      "expected_blocked": false,
+      "split": "development",
+      "baseline_categories": [
+        "culture"
+      ]
+    },
+    {
+      "id": "night-two",
+      "requirements": {
+        "note": "夜景",
+        "days": 2,
+        "day_end": "22:00",
+        "profile": {
+          "themes": [
+            "city"
+          ]
+        }
+      },
+      "relevant_themes": [
+        "night"
+      ],
+      "expected_blocked": false,
+      "split": "development",
+      "baseline_categories": [
+        "city"
+      ]
+    },
+    {
+      "id": "night-three",
+      "requirements": {
+        "note": "夜游摄影",
+        "days": 3,
+        "day_end": "22:00",
+        "profile": {
+          "themes": [
+            "city"
+          ]
+        }
+      },
+      "relevant_themes": [
+        "night",
+        "photo"
+      ],
+      "expected_blocked": false,
+      "split": "development",
+      "baseline_categories": [
+        "city"
+      ]
+    },
+    {
+      "id": "nature-two",
+      "requirements": {
+        "note": "自然风景",
+        "days": 2,
+        "profile": {
+          "themes": [
+            "nature"
+          ]
+        }
+      },
+      "relevant_themes": [
+        "nature"
+      ],
+      "expected_blocked": false,
+      "split": "development",
+      "baseline_categories": [
+        "nature"
+      ]
+    },
+    {
+      "id": "nature-three",
+      "requirements": {
+        "note": "自然风景",
+        "days": 3,
+        "profile": {
+          "themes": [
+            "nature"
+          ]
+        }
+      },
+      "relevant_themes": [
+        "nature"
+      ],
+      "expected_blocked": false,
+      "split": "development",
+      "baseline_categories": [
+        "nature"
+      ]
+    },
+    {
+      "id": "architecture-two",
+      "requirements": {
+        "note": "建筑摄影",
+        "days": 2,
+        "profile": {
+          "themes": [
+            "city"
+          ]
+        }
+      },
+      "relevant_themes": [
+        "architecture",
+        "photo"
+      ],
+      "expected_blocked": false,
+      "split": "development",
+      "baseline_categories": [
+        "city"
+      ]
+    },
+    {
+      "id": "photo-two",
+      "requirements": {
+        "note": "拍照",
+        "days": 2,
+        "profile": {
+          "themes": [
+            "city",
+            "nature"
+          ]
+        }
+      },
+      "relevant_themes": [
+        "photo"
+      ],
+      "expected_blocked": false,
+      "split": "development",
+      "baseline_categories": [
+        "city",
+        "nature"
+      ]
+    },
+    {
+      "id": "food-two",
+      "requirements": {
+        "note": "当地小吃",
+        "days": 2,
+        "profile": {
+          "themes": [
+            "city"
+          ]
+        }
+      },
+      "relevant_themes": [
+        "food"
+      ],
+      "expected_blocked": false,
+      "split": "development",
+      "baseline_categories": [
+        "city"
+      ]
+    },
+    {
+      "id": "protected-outlier",
+      "requirements": {
+        "note": "历史",
+        "days": 1,
+        "must_visit": [
+          "nature-2"
+        ],
+        "profile": {
+          "themes": [
+            "culture"
+          ]
+        }
+      },
+      "relevant_themes": [
+        "history"
+      ],
+      "expected_blocked": false,
+      "split": "development",
+      "baseline_categories": [
+        "culture"
+      ]
+    },
+    {
+      "id": "protected-coffee",
+      "requirements": {
+        "note": "历史，少步行",
+        "days": 2,
+        "must_visit": [
+          "coffee"
+        ],
+        "profile": {
+          "themes": [
+            "culture"
+          ]
+        }
+      },
+      "relevant_themes": [
+        "history"
+      ],
+      "expected_blocked": false,
+      "split": "development",
+      "baseline_categories": [
+        "culture"
+      ]
+    },
+    {
+      "id": "pinned-day-two",
+      "requirements": {
+        "note": "自然风景",
+        "days": 2,
+        "place_days": {
+          "history-0": 2
+        },
+        "profile": {
+          "themes": [
+            "nature"
+          ]
+        }
+      },
+      "relevant_themes": [
+        "nature"
+      ],
+      "expected_blocked": false,
+      "split": "development",
+      "baseline_categories": [
+        "nature"
+      ]
+    },
+    {
+      "id": "pinned-day-three",
+      "requirements": {
+        "note": "夜景",
+        "days": 3,
+        "place_days": {
+          "history-0": 3
+        },
+        "day_end": "22:00",
+        "profile": {
+          "themes": [
+            "city"
+          ]
+        }
+      },
+      "relevant_themes": [
+        "night"
+      ],
+      "expected_blocked": false,
+      "split": "development",
+      "baseline_categories": [
+        "city"
+      ]
+    },
+    {
+      "id": "fixed-appointment",
+      "requirements": {
+        "note": "建筑",
+        "days": 2,
+        "appointments": [
+          {
+            "place_id": "history-0",
+            "day": 1,
+            "start": "14:00",
+            "end": "15:00"
+          }
+        ],
+        "profile": {
+          "themes": [
+            "city"
+          ]
+        }
+      },
+      "relevant_themes": [
+        "architecture"
+      ],
+      "expected_blocked": false,
+      "split": "development",
+      "baseline_categories": [
+        "city"
+      ]
+    },
+    {
+      "id": "late-arrival",
+      "requirements": {
+        "note": "历史",
+        "days": 2,
+        "arrival": {
+          "location": {
+            "name": "自建抵达点",
+            "longitude": 120.1,
+            "latitude": 30.25
+          },
+          "time": "20:00",
+          "buffer_minutes": 45
+        },
+        "profile": {
+          "themes": [
+            "culture"
+          ]
+        }
+      },
+      "relevant_themes": [
+        "history"
+      ],
+      "expected_blocked": false,
+      "split": "development",
+      "baseline_categories": [
+        "culture"
+      ]
+    },
+    {
+      "id": "early-departure",
+      "requirements": {
+        "note": "公园",
+        "days": 2,
+        "departure": {
+          "location": {
+            "name": "自建返程点",
+            "longitude": 120.34,
+            "latitude": 30.25
+          },
+          "time": "08:00",
+          "buffer_minutes": 45
+        },
+        "profile": {
+          "themes": [
+            "nature"
+          ]
+        }
+      },
+      "relevant_themes": [
+        "nature"
+      ],
+      "expected_blocked": false,
+      "split": "development",
+      "baseline_categories": [
+        "nature"
+      ]
+    },
+    {
+      "id": "short-window",
+      "requirements": {
+        "note": "历史",
+        "days": 1,
+        "day_start": "09:00",
+        "day_end": "10:00",
+        "must_visit": [
+          "history-0"
+        ],
+        "profile": {
+          "themes": [
+            "culture"
+          ]
+        }
+      },
+      "relevant_themes": [
+        "history"
+      ],
+      "expected_blocked": false,
+      "split": "development",
+      "baseline_categories": [
+        "culture"
+      ]
+    },
+    {
+      "id": "contradiction",
+      "requirements": {
+        "note": "不去咖啡",
+        "days": 1,
+        "must_visit": [
+          "coffee"
+        ],
+        "profile": {
+          "themes": [
+            "culture"
+          ]
+        }
+      },
+      "relevant_themes": [
+        "history"
+      ],
+      "expected_blocked": true,
+      "split": "development",
+      "baseline_categories": [
+        "culture"
+      ]
+    }
+  ]
+}

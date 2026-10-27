@@ -1,6 +1,10 @@
 import { test, expect } from "@playwright/test";
 
-test.beforeEach(async ({ request }) => {
+test.beforeEach(async ({ page, request }) => {
+  // Browser regression must not depend on external font downloads.
+  await page.route(/^https:\/\/fonts\.(googleapis|gstatic)\.com\//, (route) =>
+    route.abort(),
+  );
   const result = await request.post("/api/settings/local/clear", { data: {} });
   expect(result.ok()).toBeTruthy();
 });
@@ -25,12 +29,12 @@ test("generate, confirm, replan, reload and restore a fixed appointment", async 
   ).toBeVisible();
   await page
     .getByLabel("想怎样调整？", { exact: true })
-    .fill("第1天晚出发40分钟");
+    .fill("第1天晚出发5分钟");
   await page.getByRole("button", { name: "生成行程调整" }).click();
   await expect(
     page.getByRole("heading", { name: "自然语言行程调整 · 尚未保存" }),
   ).toBeVisible();
-  await expect(page.getByText("09:40 出发", { exact: true })).toBeVisible();
+  await expect(page.getByText("09:05 出发", { exact: true })).toBeVisible();
   await expect(page.getByText("14:00 — 15:30", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "保存演示行程" }).click();
   await expect(
@@ -64,14 +68,14 @@ test("an impossible time window cannot be saved as a valid itinerary", async ({
   await page.getByLabel("当天结束", { exact: true }).fill("09:10");
   await page.getByRole("button", { name: "生成我的行程" }).click();
   await expect(
-    page.getByText("暂未找到满足条件的方案", { exact: true }),
+    page.getByText("草案仍有冲突，暂不能保存", { exact: true }),
   ).toBeVisible();
   await expect(
     page.getByRole("button", { name: "保存演示行程" }),
   ).toBeDisabled();
   const preview = page.getByRole("region", { name: "行程预览", exact: true });
   await expect(preview.getByRole("alert")).toContainText("暂时无法保存");
-  await expect(preview.getByRole("alert")).toContainText("未找到可用安排");
+  await expect(preview.getByRole("alert")).toContainText("必去地点尚未排入");
   await preview
     .getByRole("button", { name: "查看完整行程检查 ↓", exact: true })
     .click();

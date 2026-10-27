@@ -17,7 +17,7 @@ from app.validation import validate_itinerary
 
 
 def fixture():
-    req = Requirements(start_date="2026-10-24", days=3, day_end="13:00", lodging_mode="route_first")
+    req = Requirements(start_date="2026-10-24", days=3, day_end="12:20", lodging_mode="route_first")
     catalog = {
         f"p{i}": CATALOG["westlake"].model_copy(
             update={

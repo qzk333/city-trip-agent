@@ -11,6 +11,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import inspect, select, update
 
 from app.agent_tasks import task_views
+from app.candidate_discovery import recommend_places
 from app.catalog import decode_catalog, demo_catalog
 from app.config import ROOT, Settings, get_settings
 from app.database import (
@@ -27,8 +28,10 @@ from app.geography import DEFAULT_CITY_ID, get_city, grouped_cities, regions
 from app.local_config import clear_config, config_view, require_local_request, write_config
 from app.schemas import (
     ApplyRequest,
+    CandidateRequest,
     CityQuery,
     ConnectionTest,
+    DeleteTripRequest,
     HotelChoiceRequest,
     Itinerary,
     Location,
@@ -47,6 +50,7 @@ from app.services import (
     trip_view,
 )
 from app.tools import ToolUnavailable, TravelTools
+from app.trip_history import confirmed_history, delete_confirmed_trip, lock_trip
 from app.user_config import request_settings, test_model_connection
 
 
@@ -182,6 +186,49 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "center": result["center"],
             }
 
+    @app.post("/api/places/recommendations")
+    def recommendations(body: CandidateRequest, request: Request):
+        runtime = request_settings(settings, request)
+        try:
+            destination = get_city(body.city_id)
+            with factory() as db:
+                previous = None
+                if body.catalog_id:
+                    snapshot = db.get(CatalogRecord, body.catalog_id)
+                    if snapshot is None or snapshot.city_id != body.city_id:
+                        raise ValueError("地点目录与当前城市不匹配，请重新选择目的地。")
+                    previous = decode_catalog(snapshot.places, body.city_id)
+                if body.source_trip_id:
+                    trip = require_trip(db, body.source_trip_id)
+                    if trip.current_version != body.base_version:
+                        raise HTTPException(409, "行程版本已变化，请刷新后再更新候选。")
+                    if trip.requirements.get("city_id") != body.city_id:
+                        raise ValueError("保留地点的旅行与当前城市不匹配。")
+                    previous = {**(previous or {}), **decode_catalog(trip.catalog, body.city_id)}
+            tools = TravelTools(
+                runtime, destination["name"], destination["country_code"], province=destination["state"]
+            )
+            result = recommend_places(body, destination, tools, previous)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        except ToolUnavailable as exc:
+            raise HTTPException(400, str(exc)) from exc
+        with factory.begin() as db:
+            snapshot = CatalogRecord(
+                city_id=body.city_id, places=result["places"], discovery=result["metadata"]
+            )
+            db.add(snapshot)
+            db.flush()
+            return {
+                "catalog_id": snapshot.id,
+                "places": list(result["places"].values()),
+                "center": result["center"],
+                "profile": result["profile"],
+                "note": result["note"],
+                "fingerprint": result["metadata"]["fingerprint"],
+                "queries": result["metadata"]["queries"],
+            }
+
     @app.post("/api/settings/test")
     def test_connection(body: ConnectionTest, request: Request):
         runtime = request_settings(settings, request)
@@ -242,6 +289,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except ToolUnavailable as exc:
             raise HTTPException(400, str(exc)) from exc
 
+    @app.get("/api/trips")
+    def list_trips(
+        q: str = Query(default="", max_length=100),
+        offset: int = Query(default=0, ge=0),
+        limit: int = Query(default=12, ge=1, le=50),
+    ):
+        with factory() as db:
+            return confirmed_history(db, q.strip(), offset, limit)
+
+    @app.delete("/api/trips/{trip_id}")
+    def delete_trip(trip_id: str, body: DeleteTripRequest):
+        with factory.begin() as db:
+            return delete_confirmed_trip(db, trip_id, body.base_version)
+
     @app.get("/api/trips/{trip_id}")
     def get_trip(trip_id: str):
         with factory() as db:
@@ -251,7 +312,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def plan_trip(trip_id: str, background: BackgroundTasks, request: Request):
         runtime = request_settings(settings, request)
         with factory.begin() as db:
-            trip = require_trip(db, trip_id)
+            trip = lock_trip(db, trip_id)
             run = RunRecord(trip_id=trip_id, base_version=trip.current_version)
             db.add(run)
             db.flush()
@@ -263,7 +324,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def propose(trip_id: str, body: ProposalRequest, background: BackgroundTasks, request: Request):
         runtime = request_settings(settings, request)
         with factory.begin() as db:
-            trip = require_trip(db, trip_id)
+            trip = lock_trip(db, trip_id)
             if trip.current_version != body.base_version:
                 raise HTTPException(409, "行程版本已变化，请刷新")
             base = current_itinerary(db, trip)
@@ -294,7 +355,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def choose_hotel(trip_id: str, body: HotelChoiceRequest, background: BackgroundTasks, request: Request):
         runtime = request_settings(settings, request)
         with factory.begin() as db:
-            trip = require_trip(db, trip_id)
+            trip = lock_trip(db, trip_id)
             if trip.current_version != body.base_version:
                 raise HTTPException(409, "行程版本已变化，请刷新后选择酒店。")
             base = current_itinerary(db, trip)
@@ -316,7 +377,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def revise(trip_id: str, body: NaturalRevisionRequest, background: BackgroundTasks, request: Request):
         runtime = request_settings(settings, request)
         with factory.begin() as db:
-            trip = require_trip(db, trip_id)
+            trip = lock_trip(db, trip_id)
             if trip.current_version != body.base_version:
                 raise HTTPException(409, "行程版本已变化，请刷新后重新描述修改。")
             if current_itinerary(db, trip) is None:
@@ -349,7 +410,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "base_version": proposal.base_version,
                     "label": proposal.label,
                     "itinerary": proposal.itinerary,
-                    "requirements": proposal.requirements,
+                    "requirements": Requirements(**proposal.requirements).model_dump(mode="json")
+                    if proposal.requirements
+                    else None,
                     "places": [
                         p.model_dump()
                         for p in decode_catalog(

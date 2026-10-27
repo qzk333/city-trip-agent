@@ -25,6 +25,45 @@ export interface Place extends Location {
   source_url: string;
   evidence_note: string;
   fixture: boolean;
+  traits?: {
+    themes: string[];
+    indoor_outdoor: "indoor" | "outdoor" | "mixed" | "unknown";
+    duration_min: number | null;
+    duration_max: number | null;
+    audience_notes: string[];
+    unknowns: string[];
+    evidence: {
+      field: string;
+      value: string;
+      kind: string;
+      source_url: string;
+      observed_at: string;
+      excerpt: string;
+    }[];
+  };
+  candidate_match?: {
+    score: number;
+    relevance: number;
+    diversity_penalty: number;
+    detour_penalty: number;
+    reasons: string[];
+  } | null;
+}
+export interface TravelProfile {
+  companions: "unspecified" | "solo" | "friends" | "parents" | "children";
+  themes: (
+    | "history"
+    | "architecture"
+    | "night"
+    | "photo"
+    | "nature"
+    | "food"
+    | "coffee"
+    | "culture"
+    | "city"
+  )[];
+  walking: "normal" | "less";
+  excluded_keywords: string[];
 }
 export interface Requirements {
   city: string;
@@ -48,10 +87,10 @@ export interface Requirements {
   transport: "auto" | "transit" | "walking";
   use_web_guides: boolean;
   pace: "relaxed" | "balanced";
-  interests: Place["category"][];
   must_visit: string[];
   appointments: { place_id: string; day: number; start: string; end: string }[];
   note: string;
+  profile?: TravelProfile;
 }
 export interface TravelBoundary {
   location: Location;
@@ -66,6 +105,14 @@ export interface Activity {
   end: string;
   locked: boolean;
   reason: string;
+  time_intent?: "any" | "daytime" | "sunset" | "evening" | "night";
+}
+export interface VenueAssessment {
+  place_id: string;
+  indoor_outdoor: "indoor" | "outdoor" | "mixed" | "unknown";
+  confidence: "high" | "medium" | "low";
+  reason: string;
+  basis: "model";
 }
 export interface RouteLeg {
   origin_id: string;
@@ -86,6 +133,13 @@ export interface DayPlan {
   date: string;
   activities: Activity[];
   legs: RouteLeg[];
+  breaks?: {
+    start: string;
+    end: string;
+    kind: "meal" | "rest" | "free";
+    reason: string;
+  }[];
+  weather_note?: string;
 }
 export interface Itinerary {
   status:
@@ -103,6 +157,8 @@ export interface Itinerary {
       days?: {
         date: string;
         dayweather: string;
+        nightweather?: string;
+        reporttime?: string;
         daytemp: string;
         nighttemp: string;
       }[];
@@ -115,6 +171,45 @@ export interface Itinerary {
   trace: { tool: string; status: string; provider?: string }[];
   planning_mode: string;
   tool_provider: string;
+  planning_decision?: {
+    source:
+      "model_schedule" | "model_days" | "model_order" | "rules" | "legacy";
+    model_calls: number;
+    notes: string[];
+    recommendations: PlaceRecommendation[];
+    review_rounds?: number;
+    review_outcome?:
+      "not_requested" | "applied" | "unchanged" | "failed" | "budget_exhausted";
+    selected_attempt?: number;
+    weather_provided?: boolean;
+    place_assessments?: VenueAssessment[];
+    quality_review?: {
+      status: "not_requested" | "passed" | "changes_requested" | "unavailable";
+      summary: string;
+      days: {
+        day: number;
+        evening: "scheduled" | "rest_justified" | "not_applicable" | "missing";
+        pace: "appropriate" | "rest_justified" | "too_sparse" | "too_dense";
+        explanation: string;
+      }[];
+      issues: {
+        category: string;
+        day: number;
+        place_ids: string[];
+        alternative_ids: string[];
+        evidence: string;
+        suggestion: string;
+      }[];
+      failure_code?: string;
+      overall_score?: number | null;
+    };
+    review_failure?: {
+      code: string;
+      message: string;
+      retryable: boolean;
+      details?: { code: string; field: string; message: string }[];
+    } | null;
+  };
   day_start_offsets: Record<string, number>;
   lodging?: HotelResearch;
   revision_note?: string;
@@ -127,7 +222,17 @@ export interface Itinerary {
     note: string;
     fetched_at: string;
     sources: { id: string; title: string; url: string; content_kind: string }[];
+    discovered_place_ids?: string[];
+    discovery_note?: string;
   };
+}
+export interface PlaceRecommendation {
+  place_id: string;
+  reason: string;
+  role: "landmark" | "interest" | "neighborhood" | "rest" | "alternative";
+  source_ids: string[];
+  tradeoff: string;
+  basis: "model" | "rule";
 }
 export interface HotelCandidate {
   id: string;
@@ -212,10 +317,10 @@ export async function api<T>(
   path: string,
   body?: unknown,
   config?: UserAPIConfig,
-  options?: { signal?: AbortSignal },
+  options?: { signal?: AbortSignal; method?: "GET" | "POST" | "DELETE" },
 ): Promise<T> {
   const response = await fetch(`/api${path}`, {
-    method: body === undefined ? "GET" : "POST",
+    method: options?.method || (body === undefined ? "GET" : "POST"),
     headers: {
       ...(config ? { "X-Travel-Config": requestConfigHeader(config) } : {}),
       ...(body === undefined ? {} : { "Content-Type": "application/json" }),

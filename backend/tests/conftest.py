@@ -7,6 +7,19 @@ from app.schemas import GuideResearch, Requirements
 
 
 @pytest.fixture(autouse=True)
+def offline_schedule_reviewer(monkeypatch):
+    from app.schemas import ScheduleReview
+
+    monkeypatch.setattr(
+        "app.review_agent.review_schedule",
+        lambda *_args, **_kwargs: (
+            ScheduleReview(status="unavailable", summary="离线测试未调用审核模型。", failure_code="offline"),
+            {"tool": "schedule_reviewer", "status": "offline"},
+        ),
+    )
+
+
+@pytest.fixture(autouse=True)
 def offline_guides(monkeypatch):
     monkeypatch.setattr("app.agent.research_guides", lambda *_: GuideResearch())
     from app.amap_gateway import _states

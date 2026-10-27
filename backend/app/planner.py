@@ -1,12 +1,17 @@
 from datetime import time, timedelta
 from math import ceil
 
+from app.candidate_ranking import matches_themes
 from app.catalog import CATALOG
 from app.lodging import boundary_window, day_boundaries
+from app.place_evidence import effective_indoor
 from app.schemas import Activity, Check, DayPlan, HotelResearch, Itinerary, Place, Requirements, ToolResult
+from app.timed_planning import build_timed_plan
 from app.tools import ToolUnavailable, TravelTools, distance_meters
+from app.travel_profile import normalize_profile
 
-TRANSFER_BUFFER = 10
+TRANSFER_BUFFER = 0  # Hard feasibility uses queried travel time, not a fixed extra quota.
+RECOMMENDED_TRANSFER_BUFFER = 10
 
 
 def minutes(value: str | time) -> int:
@@ -26,6 +31,7 @@ def build_plan(
     catalog: dict[str, Place] | None = None,
 ) -> Itinerary:
     catalog = catalog if catalog is not None else CATALOG
+    profile = normalize_profile(req.profile, req.note)
     lodging = HotelResearch.model_validate(overrides.get("lodging", {}))
     checks = [
         Check(
@@ -54,6 +60,8 @@ def build_plan(
         checks.append(
             Check(code="weather_missing", severity="warning", message=weather.error or weather.evidence)
         )
+    if overrides.get("model_schedule") is not None:
+        return build_timed_plan(req, tools, overrides, catalog, weather, lodging, checks)
     fixed = [
         Activity(
             id=f"d{a.day}-{a.place_id}-fixed{i}",
@@ -112,7 +120,7 @@ def build_plan(
             for n in range(day_number, req.days + 1)
         )
         target = max(1, ceil(len(available) / max(1, days_left)))
-        cap = max(min(3 if req.pace == "relaxed" else 4, target), len(appointments))
+        cap = max(target, len(appointments))
         if day_start >= day_end and not appointments:
             cap = 0
         exact_ids = overrides.get("per_day_ids", {}).get(str(day_number))
@@ -120,6 +128,10 @@ def build_plan(
             cap = len(exact_ids)
         groups = overrides.get("day_groups", [])
         group = groups[day_number - 1] if day_number <= len(groups) else []
+        required_today = {pid for pid, assigned in req.place_days.items() if assigned == day_number}
+        required_today.update(pid for pid in req.must_visit if req.days == 1 or pid in group)
+        # Pace is a soft density preference; it must not silently cap mandatory activities.
+        cap = max(cap, len(appointments) + len(required_today - fixed_places))
         lunch_taken = False
         try:
             # Each fixed appointment forms a boundary; the final boundary is the hotel.
@@ -138,7 +150,9 @@ def build_plan(
                         and (p not in req.place_days or req.place_days[p] == day_number)
                     ]
                     if overrides.get("indoor"):
-                        candidates = [p for p in candidates if catalog[p].indoor or p in req.must_visit]
+                        candidates = [
+                            p for p in candidates if effective_indoor(catalog[p]) or p in req.must_visit
+                        ]
                     if "allowed_place_ids" in overrides:
                         candidates = [p for p in candidates if p in overrides["allowed_place_ids"]]
                     if exact_ids is not None:
@@ -153,7 +167,7 @@ def build_plan(
                             p not in req.must_visit,
                             p not in group if group else False,
                             candidate_ids.index(p) if overrides.get("preferred") else 0,
-                            catalog[p].category not in req.interests,
+                            not matches_themes(catalog[p], profile),
                             distance_meters(origin, catalog[p]) if origin else 0,
                             candidate_ids.index(p),
                         )

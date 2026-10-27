@@ -910,6 +910,18 @@ legend {
   padding: 11px 0;
   border-top: 1px solid #e8ecdf;
 }
+.guide-discovery-note {
+  margin: 12px 0;
+  padding: 10px 12px;
+  background: #edf3e7;
+  border-radius: 7px;
+  font-size: 11px;
+  line-height: 1.8;
+  color: #5e7855;
+}
+.guide-discovery-note p {
+  margin: 3px 0;
+}
 .guide-source strong {
   font-size: 11px;
   line-height: 1.8;
@@ -1279,6 +1291,215 @@ legend {
   max-height: 80vh;
   overflow: auto;
   box-shadow: 0 20px 80px #1e312533;
+}
+.trip-history {
+  width: min(680px, 100%);
+}
+.trip-history .modal-title h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.history-search {
+  display: flex;
+  gap: 10px;
+  margin: 18px 0;
+}
+.history-search input {
+  flex: 1;
+  min-width: 0;
+  padding: 11px;
+  border: 1px solid #dce2d4;
+  border-radius: 6px;
+  background: #fff;
+}
+.history-search .outline-button {
+  width: auto;
+  flex-shrink: 0;
+}
+.trip-history-item {
+  border-top: 1px solid #e2e6d8;
+  padding: 18px 0;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 14px;
+}
+.trip-history-item h3 {
+  font-size: 17px;
+  font-weight: 500;
+  margin: 0 0 8px;
+}
+.trip-history-item p {
+  font-size: 13px;
+  margin: 5px 0;
+}
+.trip-history-item small,
+.history-storage-note {
+  color: #7d8875;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.day-arrangements {
+  margin: 0 0 22px;
+  padding: 17px 20px;
+  border: 1px solid #dfe5d8;
+  border-radius: 10px;
+  background: #f6f8f0;
+}
+.check-group {
+  margin-top: 17px;
+}
+.check-group h3 {
+  margin: 0 0 9px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #5c7354;
+}
+.check-group small {
+  font-size: 11px;
+  color: #85907b;
+}
+.check-changes summary {
+  font-size: 12px;
+  color: #78856f;
+  cursor: pointer;
+}
+.basis-timing-warning {
+  color: #a15737;
+  border-left: 2px solid #c09373;
+  padding-left: 10px;
+}
+.recommendation-basis details {
+  font-size: 12px;
+  margin-bottom: 10px;
+}
+.recommendation-basis details summary {
+  cursor: pointer;
+  color: #887e63;
+}
+.venue-assessment {
+  border-top: 1px solid #e4eadc;
+  padding-top: 10px;
+}
+.day-weather-note {
+  display: flex;
+  gap: 10px;
+  font-size: 12px;
+  line-height: 1.8;
+  margin: 0;
+}
+.day-weather-note svg {
+  flex-shrink: 0;
+  margin-top: 4px;
+}
+.day-weather-note strong {
+  display: block;
+  font-weight: 500;
+}
+.day-arrangements h3 {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 12px;
+  font-weight: 500;
+  margin: 14px 0 8px;
+}
+.day-arrangements ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.day-arrangements li {
+  display: flex;
+  gap: 16px;
+  padding: 7px 0;
+  font-size: 11px;
+  line-height: 1.7;
+}
+.day-arrangements time {
+  white-space: nowrap;
+  color: #617a58;
+}
+@media (max-width: 760px) {
+  .day-arrangements {
+    padding: 14px;
+  }
+  .day-arrangements li {
+    flex-direction: column;
+    gap: 2px;
+  }
+}
+.history-item-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.history-delete-confirm {
+  grid-column: 1 / -1;
+  padding: 12px;
+  border-radius: 6px;
+  background: #f5eae2;
+}
+.history-delete-confirm .text-button {
+  margin-left: 15px;
+}
+.history-delete-confirm p {
+  margin-bottom: 12px;
+}
+.history-delete-confirm .danger,
+.history-error {
+  color: #a34d32;
+}
+.history-error {
+  font-size: 13px;
+  margin: 12px 0;
+}
+.history-error button {
+  margin-left: 10px;
+  text-decoration: underline;
+}
+.history-empty {
+  padding: 30px 0;
+  color: #7d8875;
+}
+.history-pagination {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 15px 0;
+  font-size: 12px;
+}
+.history-pagination span {
+  flex: 1;
+}
+.history-storage-note {
+  display: block;
+  border-top: 1px solid #e2e6d8;
+  padding-top: 12px;
+}
+@media (max-width: 760px) {
+  .topbar .brand-en {
+    display: none;
+  }
+  .topbar .brand {
+    gap: 6px;
+  }
+  .topbar .topbar-actions {
+    gap: 9px;
+  }
+  .topbar .text-button {
+    gap: 3px;
+    font-size: 10px;
+  }
+  .trip-history {
+    padding: 20px 16px;
+  }
+  .trip-history-item {
+    grid-template-columns: 1fr;
+  }
+  .history-item-actions {
+    justify-content: space-between;
+  }
 }
 .modal-title {
   display: flex;
@@ -2152,4 +2373,103 @@ legend {
   border-radius: 4px;
   padding: 3px 6px;
   margin-bottom: 5px;
+}
+.candidate-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+.candidate-copy strong {
+  font-size: inherit;
+  font-weight: 500;
+}
+.candidate-copy small,
+.field-hint {
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--muted, #7a8572);
+  overflow-wrap: anywhere;
+}
+.candidate-copy a {
+  font-size: 12px;
+  color: #476e5b;
+  text-underline-offset: 3px;
+}
+.candidate-warning {
+  padding: 12px;
+  border-radius: 8px;
+  background: #f5eee5;
+  color: #946449;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.travel-preferences .field {
+  margin-top: 14px;
+}
+.travel-preferences .interest-options {
+  margin-top: 8px;
+}
+.place-options {
+  display: grid;
+  grid-template-columns: 1fr;
+  max-height: min(60vh, 560px);
+}
+.candidate-option {
+  min-width: 0;
+  width: 100%;
+}
+.candidate-option > label {
+  width: 100%;
+  box-sizing: border-box;
+}
+.recommendation-basis {
+  margin: 10px 0;
+  padding: 12px;
+  border-radius: 8px;
+  background: #f4f6ef;
+  font-size: 12px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+.recommendation-basis h4 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  color: #3f654f;
+}
+.recommendation-basis p {
+  margin: 5px 0;
+}
+.recommendation-basis small,
+.basis-limit {
+  color: #7a8572;
+}
+.recommendation-basis a {
+  display: block;
+  color: #476e5b;
+  text-decoration: underline;
+}
+.recommendation-basis.compact {
+  margin: 0 0 6px;
+  padding: 7px 10px;
+}
+.recommendation-basis summary {
+  cursor: pointer;
+  color: #476e5b;
+}
+.planning-decision {
+  margin: 14px 0;
+  border: 1px solid #dce5d6;
+  border-radius: 8px;
+  padding: 12px;
+  font-size: 12px;
+  line-height: 1.7;
+}
+.planning-decision strong,
+.planning-decision span {
+  display: block;
+}
+.planning-decision p {
+  margin: 4px 0 0;
+  color: #7a8572;
 }

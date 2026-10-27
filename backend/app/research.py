@@ -12,6 +12,7 @@ from ddgs import DDGS
 
 from app.config import Settings
 from app.schemas import GuideResearch, GuideSource, Requirements
+from app.travel_profile import THEME_NAMES, normalize_profile
 from app.user_config import check_public_dns, validate_public_url
 
 _cache: dict[tuple, tuple[float, GuideResearch]] = {}
@@ -81,12 +82,16 @@ def search_guides(query: str, timeout: float) -> list[dict]:
 def research_guides(req: Requirements, settings: Settings, deadline: float) -> GuideResearch:
     if not req.use_web_guides or (settings.planning_mode == "demo" and settings.tool_provider == "demo"):
         return GuideResearch(note="本次未联网检索攻略；演示模式不会声称已参考网上资料。")
-    key = (req.country_code, req.city, req.days)
+    profile = normalize_profile(req.profile, req.note)
+    preferences = " ".join(THEME_NAMES[t] for t in profile.themes)
+    if profile.walking == "less":
+        preferences += " 少步行"
+    key = (req.country_code, req.city, req.days, str(req.start_date), preferences, req.note)
     with _cache_lock:
         cached = _cache.get(key)
         if cached and cached[0] > monotonic():
             return cached[1].model_copy(deep=True)
-    query = f"{req.city} {req.days}天 旅游攻略 行程 交通 步行 打车"
+    query = f"{req.city} {req.days}天 {preferences} 旅游攻略 行程 交通 步行 打车"
     result = GuideResearch(query=query, fetched_at=datetime.now(UTC).isoformat())
     try:
         timeout = min(settings.guide_search_timeout_seconds, max(1, deadline - monotonic()))

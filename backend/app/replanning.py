@@ -1,13 +1,16 @@
 """Goal-preserving cross-day replanning with bounded feedback and sourced discovery."""
 
+from collections import Counter
 from copy import deepcopy
 from itertools import islice
 from time import monotonic
 
 from pydantic import Field
 
+from app.candidate_ranking import rank_candidates
 from app.lodging import trip_points
 from app.planner import build_plan
+from app.review_agent import audit_schedule
 from app.revisions import (
     CandidateSearch,
     model_json,
@@ -15,8 +18,9 @@ from app.revisions import (
     revise_route,
     revision_context,
 )
-from app.schemas import Check, Schema
+from app.schemas import Check, ScheduledDay, Schema, VenueAssessment
 from app.tools import ToolUnavailable
+from app.travel_profile import normalize_profile
 from app.validation import validate_itinerary
 
 MAX_REPAIR_ROUNDS = 3
@@ -25,7 +29,7 @@ MAX_SEARCHES = 2
 
 class DaySelection(Schema):
     day: int = Field(ge=1, le=3)
-    place_ids: list[str] = Field(max_length=20)
+    place_ids: list[str]
 
 
 class ChangeReason(Schema):
@@ -38,6 +42,8 @@ class RepairPlan(Schema):
     days: list[DaySelection] = Field(default_factory=list, max_length=3)
     searches: list[CandidateSearch] = Field(default_factory=list, max_length=2)
     reasons: list[ChangeReason] = Field(default_factory=list, max_length=30)
+    daily_schedule: list[ScheduledDay] | None = Field(default=None, max_length=3)
+    place_assessments: list[VenueAssessment] = Field(default_factory=list, max_length=40)
 
 
 def scoped_assignment(proposal, base, scope):
@@ -51,7 +57,7 @@ def scoped_assignment(proposal, base, scope):
         raise ToolUnavailable("重规划试图修改冻结日期；请保持这些日期的地点和顺序不变。")
     if not scope <= set(per_day):
         raise ToolUnavailable(f"重规划必须完整返回允许调整的日期 {sorted(scope)}。")
-    frozen_ids = {pid for ids in frozen.values() for pid in ids}
+    frozen_ids = {pid for ids in frozen.values() for pid in ids} if proposal.daily_schedule is None else set()
     ignored = sorted({pid for day in scope for pid in per_day[day] if pid in frozen_ids})
     assignment = {day: [pid for pid in per_day[day] if pid not in frozen_ids] for day in sorted(scope)}
     return assignment, {"unchanged_frozen_days": sorted(extras), "retained_frozen_places": ignored}
@@ -118,7 +124,7 @@ def summarize_changes(base, result, catalog, reasons):
     return changes[:40]
 
 
-def run_revision(req, base, intent, tools, catalog, *, message, emit=lambda *_: None):
+def run_revision(req, base, intent, tools, catalog, *, message, emit=lambda *_: None, journal=None):
     """Return effective requirements, a preview, its catalog, and an audit trail."""
     intent = intent.model_copy(deep=True)
     catalog = dict(catalog)
@@ -173,6 +179,11 @@ def run_revision(req, base, intent, tools, catalog, *, message, emit=lambda *_: 
                     record["status"] = "unavailable"
                     raise
                 # Existing IDs retain their original evidence and scheduling attributes.
+                found = rank_candidates(
+                    found,
+                    normalize_profile(req.profile, req.note),
+                    protected=found if query.required else (),
+                )
                 searches[key] = list(found)
                 for pid, place in found.items():
                     catalog.setdefault(pid, place)
@@ -238,7 +249,16 @@ def run_revision(req, base, intent, tools, catalog, *, message, emit=lambda *_: 
     )
     if not intent.allow_drop_optional:
         required.update(pid for ids in desired.values() for pid in ids)
-    excluded = {op.place_id for op in intent.operations if op.kind == "remove"}
+    required_visits = (
+        Counter(pid for ids in desired.values() for pid in ids)
+        if not intent.allow_drop_optional
+        else Counter()
+    )
+    excluded = {
+        op.place_id
+        for op in intent.operations
+        if op.kind == "remove" and not any(op.place_id in ids for ids in desired.values())
+    }
     original_ids = {a.place_id for day in base.days for a in day.activities}
     discovered_ids = {pid for ids in searches.values() for pid in ids}
     explicit_additions = {op.place_id for op in intent.operations if op.kind == "add"}
@@ -246,6 +266,15 @@ def run_revision(req, base, intent, tools, catalog, *, message, emit=lambda *_: 
     def check_goals(candidate):
         candidate.checks = [c for c in candidate.checks if c.code != "revision_goal_missing"]
         visited = {a.place_id for day in candidate.days for a in day.activities}
+        visit_counts = Counter(a.place_id for day in candidate.days for a in day.activities)
+        if required_visits - visit_counts:
+            candidate.checks.append(
+                Check(
+                    code="revision_goal_missing",
+                    severity="error",
+                    message="调整未保留用户请求的全部到访次数，请保留重访的具体时间安排。",
+                )
+            )
         missing = required - visited
         if missing:
             candidate.checks.append(
@@ -271,11 +300,33 @@ def run_revision(req, base, intent, tools, catalog, *, message, emit=lambda *_: 
         return candidate
 
     result = check_goals(result)
+    revision_fixed = {"fixed": [a.model_dump() for day in base.days for a in day.activities if a.locked]}
+    audit_schedule(updated, result, catalog, tools, journal=journal, emit=emit, reserve_seconds=25)
+    result = check_goals(validate_itinerary(updated, result, revision_fixed, catalog))
+
+    def quality_feedback(candidate):
+        report = candidate.planning_decision.quality_review
+        return (
+            [
+                {"code": f"reviewer_{issue.category}", **issue.model_dump(mode="json")}
+                for issue in report.issues
+                if issue.day in scope
+            ]
+            if report.status == "changes_requested"
+            else []
+        )
+
     audit["rounds"].append({"stage": "initial", "errors": errors(result)})
     needs_reselect = intent.require_reselection or bool(groups) or not intent.operations
     verified = None
     used_fallback = False
-    if errors(result) and not needs_reselect and intent.scope != "local" and len(scope) > 1:
+    if (
+        errors(result)
+        and not needs_reselect
+        and intent.scope != "local"
+        and len(scope) > 1
+        and base.planning_decision.source != "model_schedule"
+    ):
         try:
             support_base = base.model_copy(deep=True)
             support_base.day_start_offsets = result.day_start_offsets
@@ -297,8 +348,12 @@ def run_revision(req, base, intent, tools, catalog, *, message, emit=lambda *_: 
             audit["program_verified_option"] = support_plan.model_dump(mode="json")
         except ToolUnavailable as exc:
             audit["precheck_note"] = str(exc)
-    if (errors(result) or needs_reselect) and intent.scope != "local":
-        feedback = errors(result)
+    best_reviewed = None
+    best_reasons = {}
+    if (errors(result) or needs_reselect or quality_feedback(result)) and intent.scope != "local":
+        feedback = errors(result) + quality_feedback(result)
+        if not needs_reselect:
+            best_reviewed = result.model_copy(deep=True)
         for round_number in range(1, MAX_REPAIR_ROUNDS + 1):
             if tools.deadline - monotonic() < 5 or tools.route_calls >= tools.settings.max_route_calls:
                 audit["stop_reason"] = "budget"
@@ -311,10 +366,18 @@ def run_revision(req, base, intent, tools, catalog, *, message, emit=lambda *_: 
                         tools.settings,
                         "你是旅行主 Agent 的重规划器。"
                         "根据用户目标、已选酒店、真实候选和程序反馈重新分配景点。"
-                        "只返回允许调整日期的完整 days/place_ids，不得编造ID、坐标、营业、交通或时长。"
+                        "返回允许调整日期的完整 days/place_ids，不得编造ID、坐标、营业或交通事实。"
+                        "同时返回这些日期的 daily_schedule，活动包含 place_id/start/end/reason，"
+                        "breaks 包含 start/end/kind(meal|rest|free)/reason，weather_note 解释天气取舍。"
+                        "时长参考候选估算，时间为当地 HH:MM，并与 days/place_ids 顺序一致。"
+                        "落实夜景等时段偏好，参考 weather 中实际覆盖日期的预报，不能推断小时天气。"
+                        "仅列 allowed_days；冻结日期的具体时间、用餐休息和说明由程序保留。"
+                        "time_intent仅描述模型时段意图，不对应程序固定时刻；不设每日数量或时段配额。"
+                        "可输出 place_assessments 判断所选地点室内外，附 confidence 和 reason，"
+                        "作为模型推断而非实地事实。"
                         "place_days、必去、锁定预约、酒店及抵离条件是硬约束；不能更改。"
                         "只有place_days和预约限制日期，required_place_ids只要求保留，不限制原先日期。"
-                        "frozen_place_ids已由程序保留，不要重复放进允许调整的日期。"
+                        "冻结日期的原到访已由程序保留，不要移出；明确新增重访可在允许日期另列具体时段。"
                         "program_verified_option如非空，是程序已检查可行的跨日分配，优先采用；勿重复原来失败分组。"
                         "允许把其他普通活动从拥挤日移到空闲日；原分组和顺序仅是偏好。"
                         "required_place_ids必须全部保留，excluded_place_ids不能安排。未允许替换时不得删景点。"
@@ -323,6 +386,9 @@ def run_revision(req, base, intent, tools, catalog, *, message, emit=lambda *_: 
                         "完整考虑首尾酒店交通、停留、午餐、衔接、营业和返程。按地理邻近安排顺序。"
                         "现有候选不足且允许重选时可以只返回searches、暂不返回days，最多补查2次，每次5条。"
                         "用户明确新增的地点不可被换成其他景点；无法满足则解释原因，不能悄悄丢失要求。"
+                        "quality_review为整体审核建议，综合上午、下午、晚间、活动规模、交通和休息作取舍；"
+                        "不优先补某个时段，不设固定活动数。合理重访允许，按required_visit_counts保留明确的访问次数。"
+                        "审核意见不能授权修改冻结日、锁定预约或超出用户允许的重选范围。"
                         "summary解释本轮取舍，reasons逐项解释地点移动或替换的原因。",
                         {
                             **revision_context(updated, base, catalog),
@@ -345,6 +411,8 @@ def run_revision(req, base, intent, tools, catalog, *, message, emit=lambda *_: 
                             "remaining_searches": MAX_SEARCHES - len(searches),
                             "last_attempt": [d.model_dump(mode="json") for d in result.days],
                             "feedback": feedback,
+                            "required_visit_counts": dict(required_visits),
+                            "quality_review": result.planning_decision.quality_review.model_dump(mode="json"),
                         },
                         RepairPlan,
                         tools,
@@ -365,10 +433,11 @@ def run_revision(req, base, intent, tools, catalog, *, message, emit=lambda *_: 
                 per_day, normalization = scoped_assignment(proposal, base, scope)
                 frozen_ids = {a.place_id for day in base.days if day.day not in scope for a in day.activities}
                 flat = [pid for ids in per_day.values() for pid in ids]
-                if len(flat) != len(set(flat)) or any(
-                    pid not in catalog or pid in excluded or pid in frozen_ids for pid in flat
+                if any(pid not in catalog or pid in excluded for pid in flat) or (
+                    proposal.daily_schedule is None
+                    and (len(flat) != len(set(flat)) or set(flat) & frozen_ids)
                 ):
-                    raise ToolUnavailable("重规划包含未知、重复、已移除或冻结日期的地点。")
+                    raise ToolUnavailable("重规划包含未知或已移除的地点；重访已有地点需要提供具体时间表。")
                 if not intent.reselect and set(flat) - original_ids - explicit_additions - discovered_ids:
                     raise ToolUnavailable("本次未要求重选景点，请保留原活动，只协调其日期和顺序。")
                 all_visited = set(flat) | frozen_ids
@@ -394,7 +463,38 @@ def run_revision(req, base, intent, tools, catalog, *, message, emit=lambda *_: 
                     "lodging": base.lodging.model_dump(mode="json"),
                     "weather_snapshot": base.weather.model_dump(mode="json"),
                 }
+                if proposal.daily_schedule is not None:
+                    timed = {d.day: d for d in proposal.daily_schedule}
+                    if (
+                        len(timed) != len(proposal.daily_schedule)
+                        or set(timed) != scope
+                        or any([a.place_id for a in timed[day].activities] != per_day[day] for day in scope)
+                    ):
+                        raise ToolUnavailable("具体时间表必须完整覆盖允许修改的日期，并与地点分组一致。")
+                    options["model_schedule"] = [d.model_dump() for d in proposal.daily_schedule]
+                elif (
+                    base.planning_decision.source == "model_schedule"
+                    and tools.settings.planning_mode == "llm"
+                ):
+                    raise ToolUnavailable(
+                        "本次修改未返回具体时间表，请保留晚间时段并重新安排活动及用餐休息。"
+                    )
                 candidate = build_plan(updated, flat, tools, options, catalog)
+                if proposal.daily_schedule is not None:
+                    candidate.planning_decision = base.planning_decision.model_copy(
+                        update={
+                            "source": "model_schedule",
+                            "weather_provided": True,
+                            "notes": [
+                                "本次修改由主模型重新提出受影响日期的具体时间表；冻结日期与用户锁定内容保留。"
+                            ],
+                        }
+                    )
+                    assessments = {a.place_id: a for a in base.planning_decision.place_assessments}
+                    assessments.update(
+                        {a.place_id: a for a in proposal.place_assessments if a.place_id in catalog}
+                    )
+                    candidate.planning_decision.place_assessments = list(assessments.values())[:40]
                 candidate = validate_itinerary(updated, candidate, options, catalog)
                 for day in candidate.days:
                     if day.day in scope and {a.place_id for a in day.activities} != set(per_day[day.day]):
@@ -407,8 +507,29 @@ def run_revision(req, base, intent, tools, catalog, *, message, emit=lambda *_: 
                             )
                         )
                 result = check_goals(candidate)
+                audit_schedule(
+                    updated,
+                    result,
+                    catalog,
+                    tools,
+                    journal=journal,
+                    emit=emit,
+                    reserve_seconds=20 if round_number < MAX_REPAIR_ROUNDS else 0,
+                )
+                result = check_goals(validate_itinerary(updated, result, options, catalog))
                 result.revision_rounds = round_number
-                feedback = errors(result)
+                result.revision_note = proposal.summary
+                feedback = errors(result) + quality_feedback(result)
+                if best_reviewed is None or (len(errors(result)), len(quality_feedback(result))) < (
+                    len(errors(best_reviewed)),
+                    len(quality_feedback(best_reviewed)),
+                ):
+                    best_reviewed = result.model_copy(deep=True)
+                    best_reasons = {
+                        reason.place_id: reason.reason
+                        for reason in proposal.reasons
+                        if reason.place_id in catalog
+                    }
                 audit["rounds"].append(
                     {
                         "stage": "planned",
@@ -416,7 +537,8 @@ def run_revision(req, base, intent, tools, catalog, *, message, emit=lambda *_: 
                         "summary": proposal.summary,
                         "days": {str(d): ids for d, ids in per_day.items()},
                         "scope_handling": normalization,
-                        "errors": feedback,
+                        "errors": errors(result),
+                        "quality_review": result.planning_decision.quality_review.model_dump(mode="json"),
                     }
                 )
                 if not feedback:
@@ -441,6 +563,9 @@ def run_revision(req, base, intent, tools, catalog, *, message, emit=lambda *_: 
                     break
         else:
             audit["stop_reason"] = "round_limit"
+        if best_reviewed is not None:
+            result = best_reviewed
+            reasons = best_reasons
         if needs_reselect and not any(
             row.get("stage") == "planned" and not row.get("errors") for row in audit["rounds"]
         ):

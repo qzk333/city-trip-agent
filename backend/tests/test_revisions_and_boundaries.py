@@ -80,9 +80,9 @@ def test_arrival_and_departure_are_hard_route_and_time_boundaries():
     assert result.days[0].legs[0].origin_id == "arrival"
     assert result.days[-1].legs[-1].destination_id == "departure"
     first = result.days[0]
-    assert minutes(first.activities[0].start) >= 11 * 60 + 30 + first.legs[0].duration_minutes + 10
+    assert minutes(first.activities[0].start) >= 11 * 60 + 30 + first.legs[0].duration_minutes
     last = result.days[-1]
-    assert minutes(last.activities[-1].end) + last.legs[-1].duration_minutes + 10 <= 15 * 60
+    assert minutes(last.activities[-1].end) + last.legs[-1].duration_minutes <= 15 * 60
     assert not any(c.code == "arrival_departure_unknown" for c in result.checks)
     assert not any(c.severity == "error" for c in result.checks)
 
@@ -109,7 +109,8 @@ def test_late_arrival_and_early_departure_keep_all_days_and_hotel_connections(cl
         arrival=boundary("晚到车站", "20:30", 30),
         departure=boundary("早班机场", "08:00", 60),
     )
-    assert [len(day["activities"]) for day in result["days"]] == [0, 3, 0]
+    assert not result["days"][0]["activities"] and not result["days"][2]["activities"]
+    assert len(result["days"][1]["activities"]) >= 3
     assert result["lodging"]["nights"][0]["last_place_id"] == "arrival"
     assert result["lodging"]["nights"][1]["next_place_id"] == "departure"
     for night in (1, 2):
@@ -406,7 +407,13 @@ def test_user_can_explicitly_remove_a_must_visit_but_model_cannot_do_it_unasked(
 def test_hotel_change_runs_llm_review_and_preserves_selected_hotel(monkeypatch):
     base = draft()
     candidate = base.lodging.nights[0].candidates[0]
-    base.lodging.nights[0].selected_id = candidate.id
+    base = select_hotel(
+        req(),
+        base,
+        HotelChoiceRequest(base_version=1, night=1, candidate_id=candidate.id),
+        TravelTools(settings()),
+        CATALOG,
+    )
     calls = []
 
     def fake(*args):

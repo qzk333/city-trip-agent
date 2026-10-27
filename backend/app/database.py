@@ -94,6 +94,7 @@ class CatalogRecord(Base):
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
     city_id: Mapped[int] = mapped_column(Integer)
     places: Mapped[dict] = mapped_column(JSON)
+    discovery: Mapped[dict] = mapped_column(JSON, default=dict, server_default="{}")
     created_at: Mapped[str] = mapped_column(String(40), default=now)
 
 
